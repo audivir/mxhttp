@@ -1,0 +1,36 @@
+"""Minimal typed declarative HTTP client."""
+
+from __future__ import annotations
+
+from mxhttp.consumer import AsyncConsumer, SyncConsumer
+from mxhttp.endpoint import delete, endpoint, get, head, patch, post, put
+from mxhttp.markers import Body, Cookie, Field, Header, Part, Path, Query
+from mxhttp.response import Response, response_handler, streaming_response_handler
+from mxhttp.sse import Event
+from mxhttp.types import PartValue
+
+__version__ = "1.0.0"
+
+__all__ = [
+    "AsyncConsumer",
+    "Body",
+    "Cookie",
+    "Event",
+    "Field",
+    "Header",
+    "Part",
+    "PartValue",
+    "Path",
+    "Query",
+    "Response",
+    "SyncConsumer",
+    "delete",
+    "endpoint",
+    "get",
+    "head",
+    "patch",
+    "post",
+    "put",
+    "response_handler",
+    "streaming_response_handler",
+]
