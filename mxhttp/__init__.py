@@ -9,7 +9,7 @@ from mxhttp.response import Response, response_handler, streaming_response_handl
 from mxhttp.sse import Event
 from mxhttp.types import PartValue
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "AsyncConsumer",

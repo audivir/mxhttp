@@ -16,6 +16,7 @@ from typing import (
     overload,
 )
 
+from mxhttp.parse import split_path_template
 from mxhttp.request import RequestSpec, build_plan, build_request
 from mxhttp.response import (
     apply_response_handler,
@@ -93,7 +94,8 @@ def endpoint(method: Method_T, path: str) -> EndpointDecorator:  # noqa: C901
         Callable[Concatenate[AnyC_T, P], Parsed_T]
         | Callable[Concatenate[AnyC_T, P], Coroutine[Any, Any, Parsed_T]]
     ):
-        plan, return_type = build_plan(func, path)
+        parsed = split_path_template(path)
+        plan, return_type = build_plan(func, parsed)
         sig = inspect.signature(func)
         origin = get_origin(return_type)
         stream_item = get_args(return_type)[0] if origin in (Iterator, AsyncIterator) else None
@@ -106,7 +108,7 @@ def endpoint(method: Method_T, path: str) -> EndpointDecorator:  # noqa: C901
             bound = sig.bind(self, *args, **kwargs)
             bound.apply_defaults()
             jar = dict(self.session.cookies) if has_cookies else None
-            return build_request(method, path, plan, bound.arguments, jar=jar)
+            return build_request(method, parsed, plan, bound.arguments, jar=jar)
 
         if inspect.iscoroutinefunction(func):
             if is_sse_stream:

@@ -2,35 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator  # noqa: TC003
 from dataclasses import dataclass
 from typing import Annotated, TypedDict
 
 import attrs
-import httpx
+import httpx  # noqa: TC002
 import msgspec
 from pydantic import BaseModel
 
-from mxhttp import (
-    AsyncConsumer,
-    Body,
-    Cookie,
-    Event,
-    Field,
-    Header,
-    Part,
-    PartValue,
-    Query,
-    Response,
-    SyncConsumer,
-    delete,
-    get,
-    head,
-    patch,
-    post,
-    put,
-)
-from mxhttp.response import response_handler, streaming_response_handler
+from mxhttp import AsyncConsumer, Body, SyncConsumer, delete, get, head, patch, post, put
 
 
 class Item(msgspec.Struct):
@@ -55,141 +35,6 @@ class PathApi(SyncConsumer):
 class AsyncPathApi(AsyncConsumer):
     @get("/users/{user_id}/posts/{post_id}")
     async def get_post(self, user_id: str, post_id: int) -> Item: ...  # type: ignore[empty-body]
-
-
-class QueryApi(SyncConsumer):
-    @get("/search")
-    def search(  # type: ignore[empty-body]
-        self,
-        q: Annotated[str, Query],
-        limit: Annotated[int, Query] = 20,
-        active: Annotated[bool | None, Query] = None,
-        category: Annotated[str | None, Query["cat"]] = None,
-    ) -> Item: ...
-
-
-class AsyncQueryApi(AsyncConsumer):
-    @get("/search")
-    async def search(  # type: ignore[empty-body]
-        self,
-        q: Annotated[str, Query],
-        limit: Annotated[int, Query] = 20,
-        active: Annotated[bool | None, Query] = None,
-        category: Annotated[str | None, Query["cat"]] = None,
-    ) -> Item: ...
-
-
-class ListQueryApi(SyncConsumer):
-    @get("/search")
-    def search(self, tags: Annotated[list[str], Query]) -> Item: ...  # type: ignore[empty-body]
-
-
-class ListFieldApi(SyncConsumer):
-    @post("/login")
-    def login(self, tags: Annotated[list[int], Field]) -> Item: ...  # type: ignore[empty-body]
-
-
-class HeaderApi(SyncConsumer):
-    @get("/things")
-    def get_thing(  # type: ignore[empty-body]
-        self,
-        request_id: Annotated[str, Header["X-Request-Id"]],
-        trace: Annotated[str | None, Header] = None,
-    ) -> httpx.Response: ...
-
-
-class AsyncHeaderApi(AsyncConsumer):
-    @get("/things")
-    async def get_thing(  # type: ignore[empty-body]
-        self,
-        request_id: Annotated[str, Header["X-Request-Id"]],
-        trace: Annotated[str | None, Header] = None,
-    ) -> httpx.Response: ...
-
-
-class CookieApi(SyncConsumer):
-    @get("/things")
-    def get_thing(  # type: ignore[empty-body]
-        self,
-        session_id: Annotated[str, Cookie["session_id"]],
-        theme: Annotated[str | None, Cookie] = None,
-    ) -> httpx.Response: ...
-
-
-class AsyncCookieApi(AsyncConsumer):
-    @get("/things")
-    async def get_thing(  # type: ignore[empty-body]
-        self,
-        session_id: Annotated[str, Cookie["session_id"]],
-        theme: Annotated[str | None, Cookie] = None,
-    ) -> httpx.Response: ...
-
-
-class OverrideCookieApi(SyncConsumer):
-    @get("/things")
-    def get_thing(  # type: ignore[empty-body]
-        self, session_id: Annotated[str, Cookie("session_id", override=True)]
-    ) -> httpx.Response: ...
-
-
-class FormApi(SyncConsumer):
-    @post("/login")
-    def login(  # type: ignore[empty-body]
-        self,
-        username: Annotated[str, Field],
-        password: Annotated[str, Field["pass"]],
-        remember: Annotated[bool | None, Field] = None,
-    ) -> Item: ...
-
-
-class AsyncFormApi(AsyncConsumer):
-    @post("/login")
-    async def login(  # type: ignore[empty-body]
-        self,
-        username: Annotated[str, Field],
-        password: Annotated[str, Field["pass"]],
-        remember: Annotated[bool | None, Field] = None,
-    ) -> Item: ...
-
-
-class BodyApi(SyncConsumer):
-    @post("/items")
-    def create_item(self, item: Annotated[NewItem, Body]) -> Item: ...  # type: ignore[empty-body]
-
-
-class AsyncBodyApi(AsyncConsumer):
-    @post("/items")
-    async def create_item(self, item: Annotated[NewItem, Body]) -> Item: ...  # type: ignore[empty-body]
-
-
-class UploadApi(SyncConsumer):
-    @post("/upload")
-    def upload(  # type: ignore[empty-body]
-        self,
-        description: Annotated[str, Field],
-        file: Annotated[PartValue, Part],
-    ) -> Item: ...
-
-
-class AsyncUploadApi(AsyncConsumer):
-    @post("/upload")
-    async def upload(  # type: ignore[empty-body]
-        self,
-        description: Annotated[str, Field],
-        file: Annotated[PartValue, Part],
-    ) -> Item: ...
-
-
-class BareBytesUploadApi(SyncConsumer):
-    @post("/upload")
-    def upload(self, file: Annotated[bytes, Part]) -> Item: ...  # type: ignore[empty-body]
-
-
-class HeadersUploadApi(SyncConsumer):
-    @post("/upload")
-    def upload(  # type: ignore[empty-body]
-        self, file: Annotated[tuple[str, bytes, str, dict[str, str]], Part]
-    ) -> Item: ...
 
 
 class CrudApi(SyncConsumer):
@@ -232,67 +77,6 @@ class AsyncCrudApi(AsyncConsumer):
     async def head_item(self, item_id: int) -> httpx.Response: ...  # type: ignore[empty-body]
 
 
-class NoneApi(SyncConsumer):
-    @delete("/items/{item_id}")
-    def delete_item(self, item_id: int) -> None: ...
-
-
-class AsyncNoneApi(AsyncConsumer):
-    @delete("/items/{item_id}")
-    async def delete_item(self, item_id: int) -> None: ...
-
-
-def raise_on_error(response: httpx.Response) -> httpx.Response:
-    if response.is_error:
-        raise ApiError(response.status_code, response.content)
-    return response
-
-
-@response_handler(raise_on_error)
-class StrictApi(SyncConsumer):
-    @get("/items/{item_id}")
-    def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
-
-
-@response_handler(raise_on_error)
-class AsyncStrictApi(AsyncConsumer):
-    @get("/items/{item_id}")
-    async def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
-
-
-class ApiError(Exception):
-    def __init__(self, status_code: int, body: bytes) -> None:
-        """Initializes the exception with the HTTP status code and response body."""
-        super().__init__(f"HTTP {status_code}: {body.decode(errors='replace')}")
-        self.status_code = status_code
-
-
-def unwrap_envelope(response: httpx.Response) -> httpx.Response:
-    envelope = msgspec.json.decode(response.content)
-    return httpx.Response(response.status_code, json=envelope["data"], request=response.request)
-
-
-@response_handler(unwrap_envelope)
-class EnvelopeApi(SyncConsumer):
-    @get("/items/{item_id}")
-    def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
-
-
-class WrappedResponseApi(SyncConsumer):
-    @get("/items/{item_id}")
-    def get_item(self, item_id: int) -> Response[Item]: ...  # type: ignore[empty-body]
-
-
-class AsyncWrappedResponseApi(AsyncConsumer):
-    @get("/items/{item_id}")
-    async def get_item(self, item_id: int) -> Response[Item]: ...  # type: ignore[empty-body]
-
-
-class GetNestedUnionApi(SyncConsumer):
-    @get("/values")
-    def get_nested_union(self) -> Response[list[int | None]]: ...  # type: ignore[empty-body]
-
-
 class RawApi(SyncConsumer):
     @get("/ping")
     def ping(self) -> httpx.Response: ...  # type: ignore[empty-body]
@@ -301,44 +85,6 @@ class RawApi(SyncConsumer):
 class AsyncRawApi(AsyncConsumer):
     @get("/ping")
     async def ping(self) -> httpx.Response: ...  # type: ignore[empty-body]
-
-
-class StreamApi(SyncConsumer):
-    @get("/download/{file_id}")
-    def download(self, file_id: int) -> Iterator[bytes]: ...  # type: ignore[empty-body]
-
-
-class AsyncStreamApi(AsyncConsumer):
-    @get("/download/{file_id}")
-    async def download(self, file_id: int) -> AsyncIterator[bytes]: ...  # type: ignore[empty-body]
-
-
-class SseApi(SyncConsumer):
-    @get("/events")
-    def events(self) -> Iterator[Event]: ...  # type: ignore[empty-body]
-
-
-class AsyncSseApi(AsyncConsumer):
-    @get("/events")
-    async def events(self) -> AsyncIterator[Event]: ...  # type: ignore[empty-body]
-
-
-def raise_on_error_status_only(response: httpx.Response) -> httpx.Response:
-    if response.is_error:
-        raise ApiError(response.status_code, b"")
-    return response
-
-
-@streaming_response_handler(raise_on_error_status_only)
-class StrictStreamApi(SyncConsumer):
-    @get("/download/{file_id}")
-    def download(self, file_id: int) -> Iterator[bytes]: ...  # type: ignore[empty-body]
-
-
-@streaming_response_handler(raise_on_error_status_only)
-class AsyncStrictStreamApi(AsyncConsumer):
-    @get("/download/{file_id}")
-    async def download(self, file_id: int) -> AsyncIterator[bytes]: ...  # type: ignore[empty-body]
 
 
 class TypedDictItem(TypedDict):

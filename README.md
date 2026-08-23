@@ -59,6 +59,27 @@ The method body is never run as it is replaced by the decorator. Parameters are 
 - `None`-valued `Query`, `Field`, `Header`, and `Cookie` parameters are omitted from the request.
 - `Path` parameters cannot be optional as a placeholder cannot be ommited from the URL.
 - Mismatched marker/type combinations raise a `TypeError` as soon as the class body runs, not at call time.
+- `Literal[...]` and `Enum` types are accepted where scalar types are (`Path`, `Query`, `Field`, `Header`, `Cookie`). Every literal value or enum member value must be `str`, `int`, or `float` (plus `bool` outside of `Path`). `Enum` members are serialized by their `.value`.
+
+### Inline query parameters
+
+A path template can bake query parameters directly into the string:
+
+```python
+class Shop(SyncConsumer):
+    @get("/items?category={cat}")
+    def by_category(self, cat: str) -> list[Item]: ...  # type: ignore[empty-body]
+```
+
+- An unmarked parameter binds implicitly to a `{name}` placeholder, same mechanism as `Path`.
+- `Query["cat"]` binds it to a different parameter name. Unlike every other `Marker`, the brackets aren't the wire name here — the wire name is whatever query key the template assigned to `{cat}`.
+- A query entry with no placeholder (e.g. `?active=true`) is a static value sent on every call. That key also cannot be reused by a dynamic `Query` parameter.
+- Each query key, and each placeholder field, can only be used once per path template (e.g. `/things?a={x}&a={y}` is rejected).
+- A placeholder field also cannot be reused by a real path segment (`/{id}?other={id}` is rejected).
+- A placeholder cannot be mixed with literal text in the same value (`key=prefix{name}`), and cannot stand in for the key itself (`{name}` with no `=`).
+- Every `{name}` field must be bound by exactly one parameter (implicit, `Path["name"]`, or `Query["name"]`).
+- An inline query field cannot be a `Sequence` as the placeholder reserves exactly one query spot.
+- All of the above raise a `TypeError` as soon as the class body runs, not at call time.
 
 ### Decoding the response
 
@@ -107,9 +128,11 @@ class Files(SyncConsumer):
 for chunk in shop_files.download(file_id=7):
     ...
 
-class AsyncFiles(AsyncConsumer)
+
+class AsyncFiles(AsyncConsumer):
     @get("/files/{file_id}")
     def download(self, file_id: int) -> AsyncIterator[bytes]: ...  # type: ignore[empty-body]
+
 
 async for chunk in await shop_async_files.download(file_id=7):
     ...

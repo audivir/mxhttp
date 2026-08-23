@@ -1,4 +1,4 @@
-"""Tests for decoding HTTP responses into the types declared by `MoreApi`."""
+"""Tests for decoding HTTP responses into the special types."""
 
 from __future__ import annotations
 

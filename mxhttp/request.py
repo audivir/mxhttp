@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import string
 import urllib.parse
+from enum import Enum
 from types import UnionType
 from typing import (
     TYPE_CHECKING,
@@ -28,6 +29,8 @@ from mxhttp.types import MISSING, AnyC_T, JsonValue, Param_T, Parsed_T, PartValu
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Coroutine, Mapping
     from inspect import Parameter
+
+    from mxhttp.parse import ParsedPath
 P = ParamSpec("P")
 
 
@@ -43,7 +46,7 @@ class ParamPlan(msgspec.Struct):
 class RequestKwargs(TypedDict):
     """Stores keyword arguments shared by every `session.request` or `session.stream` call."""
 
-    params: dict[str, QueryValue]
+    params: dict[str, QueryValue] | None
     headers: dict[str, str] | None
     data: dict[str, object] | None
     files: dict[str, PartValue] | None
@@ -55,7 +58,7 @@ class RequestSpec(msgspec.Struct):
 
     method: str
     url: str
-    params: dict[str, QueryValue]
+    params: dict[str, QueryValue] | None
     headers: dict[str, str] | None
     data: dict[str, object] | None
     files: dict[str, PartValue] | None
@@ -70,6 +73,13 @@ class RequestSpec(msgspec.Struct):
             "files": self.files,
             "json": self.json,
         }
+
+
+def scalar_str(value: object) -> str:
+    """Converts a scalar value to a string, using `.value` from `Enum` object."""
+    if isinstance(value, Enum):
+        value = value.value
+    return str(value)
 
 
 def unwrap_hint(hint: type | None) -> tuple[type | None, bool, list[object]]:
@@ -96,15 +106,54 @@ def unwrap_hint(hint: type | None) -> tuple[type | None, bool, list[object]]:
         hint = unwrapped
 
 
-def classify(
-    name: str, hint: type | None, path_parts: Collection[str], param: Parameter
+def resolve_inline_query(
+    marker: Query, name: str, resolved_hint: type | None, inline_query_names: Mapping[str, str]
+) -> tuple[str, Marker] | None:
+    """Resolves an explicit `Query[...]` marker against an inline query field, if it names one.
+
+    Returns:
+        The resolved `(wire_name, marker)` pair, or `None` if the marker doesn't name an inline
+        query field.
+
+    Raises:
+        TypeError: If the marker targets wire name of an inline field directly instead of its
+            placeholder name, which would bypass own validation of the field.
+    """
+    lookup_name = marker.name or name
+    if lookup_name in inline_query_names:
+        marker.validate(name, resolved_hint, allow_sequence=False)
+        return (inline_query_names[lookup_name], marker)
+    if lookup_name in inline_query_names.values():
+        raise TypeError(
+            f"Query argument {name!r} targets wire name {lookup_name!r} directly"
+            " which is reserved by an inline query"
+        )
+    return None
+
+
+def classify(  # noqa: C901
+    name: str,
+    hint: type | None,
+    path_parts: Collection[str],
+    inline_query_names: Mapping[str, str],
+    param: Parameter,
 ) -> tuple[str, Marker | type[Body]]:
-    """Resolves the binding of a parameter: an explicit marker or an implicit path parameter."""
+    """Resolves the binding of a parameter: with explicit marker or implicit path/inline query."""
     resolved_hint, is_optional, markers = unwrap_hint(hint)
     for extra in markers:  # pragma: no branch
         marker = extra() if extra in (Path, Query, Field, Part, Header, Cookie) else extra
         if isinstance(marker, Path):
+            lookup_name = marker.name or name
+            if lookup_name not in path_parts:
+                raise TypeError(
+                    f"Path argument {name!r} targets field {lookup_name!r}, but it doesn't "
+                    "appear in the path template"
+                )
             marker.validate(name, resolved_hint, is_optional, param)
+        if isinstance(marker, Query):
+            resolved = resolve_inline_query(marker, name, resolved_hint, inline_query_names)
+            if resolved is not None:
+                return resolved
         if isinstance(marker, (Query, Field, Header, Cookie, Part)):
             marker.validate(name, resolved_hint)
         if isinstance(marker, Marker):
@@ -113,6 +162,9 @@ def classify(
             Body.validate(name, resolved_hint)
             return (name, Body)
         raise TypeError(f"Unexpected extra: {extra}")
+    if name in inline_query_names:
+        Query.validate(name, resolved_hint, allow_sequence=False)
+        return (inline_query_names[name], Query())
     if name in path_parts:
         Path.validate(name, resolved_hint, is_optional, param)
         return (name, Path())
@@ -129,10 +181,10 @@ def rejects_union(return_type: type) -> bool:
     return False
 
 
-def build_plan(  # noqa: C901
+def build_plan(  # noqa: C901, PLR0912
     func: Callable[Concatenate[AnyC_T, P], Parsed_T]
     | Callable[Concatenate[AnyC_T, P], Coroutine[Any, Any, Parsed_T]],
-    path: str,
+    parsed: ParsedPath,
 ) -> tuple[list[ParamPlan], type[Parsed_T]]:
     """Builds a parameter plan and return type for a callable."""
     hints: dict[str, type] = get_type_hints(func, include_extras=True)
@@ -142,15 +194,24 @@ def build_plan(  # noqa: C901
     if rejects_union(return_type):
         raise TypeError(f"Return type must not be a union: {return_type!r}")
 
-    path_parts = {name for _, name, _, _ in string.Formatter().parse(path) if name}
+    path_parts = {name for _, name, _, _ in string.Formatter().parse(parsed.path_only) if name}
 
     sig = inspect.signature(func)
     plan: list[ParamPlan] = []
+    wire_names_seen: dict[Param_T, set[str]] = {
+        "path": set(),
+        "query": set(parsed.static_query),
+        "field": set(),
+        "header": set(),
+        "cookie": set(),
+    }
     kind: Param_T
     for py_name, param in sig.parameters.items():
         if py_name == "self":
             continue
-        wire_name, marker = classify(py_name, hints.get(py_name), path_parts, param)
+        wire_name, marker = classify(
+            py_name, hints.get(py_name), path_parts, parsed.inline_query_names, param
+        )
         if marker is Body:
             kind = "body"
         elif isinstance(marker, Path):
@@ -165,18 +226,37 @@ def build_plan(  # noqa: C901
             kind = "cookie"
         else:
             kind = "part"
+        if kind in wire_names_seen:
+            if wire_name in wire_names_seen[kind]:
+                if kind == "query" and wire_name in parsed.static_query:
+                    raise TypeError(
+                        f"Parameter {py_name!r} reuses query wire name {wire_name!r}, already "
+                        "set as a static value in the path template"
+                    )
+                raise TypeError(
+                    f"Parameter {py_name!r} reuses {kind} wire name {wire_name!r}, already "
+                    "bound by another parameter"
+                )
+            wire_names_seen[kind].add(wire_name)
         cookie_override = marker.override if isinstance(marker, Cookie) else False
         plan.append(
             ParamPlan(
                 py_name=py_name, wire_name=wire_name, kind=kind, cookie_override=cookie_override
             )
         )
+    bound_path_names = {p.wire_name for p in plan if p.kind == "path"}
+    for field_name in sorted(path_parts - bound_path_names):
+        raise TypeError(f"Path field {field_name!r} is not bound by any parameter")
+    bound_query_names = {p.wire_name for p in plan if p.kind == "query"}
+    for field_name, wire_name in sorted(parsed.inline_query_names.items()):
+        if wire_name not in bound_query_names:
+            raise TypeError(f"Inline query field {field_name!r} is not bound by any parameter")
     return plan, return_type
 
 
 def build_request(
     method: str,
-    path: str,
+    parsed: ParsedPath,
     plan: list[ParamPlan],
     values: Mapping[str, object],
     jar: Mapping[str, str] | None = None,
@@ -185,13 +265,13 @@ def build_request(
 
     Args:
         method: HTTP method for the request.
-        path: URL path template with placeholders.
+        parsed: Bare path template and static query entries, from `split_path_template()`.
         plan: Parameter plan describing how to map values to the request.
         values: Mapping of parameter names to their values.
         jar: Snapshot of the current cookie jar.
     """
     path_args: dict[str, object] = {}
-    params: dict[str, QueryValue] = {}
+    params: dict[str, QueryValue] = dict(parsed.static_query)
     headers: dict[str, str] = {}
     cookies: dict[str, str] = {}
     fields: dict[str, object] = {}
@@ -210,10 +290,10 @@ def build_request(
         elif p.kind == "part":
             files[p.wire_name] = value  # type: ignore[assignment]
         elif p.kind == "header":
-            headers[p.wire_name] = str(value)
+            headers[p.wire_name] = scalar_str(value)
         elif p.kind == "cookie":
             jar_value = None if p.cookie_override else (jar or {}).get(p.wire_name)
-            cookies[p.wire_name] = jar_value if jar_value is not None else str(value)
+            cookies[p.wire_name] = jar_value if jar_value is not None else scalar_str(value)
         else:
             body = msgspec.to_builtins(value)
     if cookies:
@@ -222,8 +302,10 @@ def build_request(
         )
     return RequestSpec(
         method=method,
-        url=path.format(**{k: urllib.parse.quote(str(v), safe="") for k, v in path_args.items()}),
-        params=params,
+        url=parsed.path_only.format(
+            **{k: urllib.parse.quote(scalar_str(v), safe="") for k, v in path_args.items()}
+        ),
+        params=params or None,
         headers=headers or None,
         data=fields or None,
         files=files or None,

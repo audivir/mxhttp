@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from enum import Enum
 from types import UnionType
-from typing import TYPE_CHECKING, Union, get_args, get_origin
+from typing import TYPE_CHECKING, Literal, Union, get_args, get_origin
 
 from typing_extensions import Self
 
@@ -14,14 +15,37 @@ if TYPE_CHECKING:
     from inspect import Parameter
 
 
+def scalar_value_types(hint: type | None) -> tuple[type, ...] | None:
+    """Returns the concrete runtime types backing a `Literal[...]` or `Enum`, else `None`."""
+    if get_origin(hint) is Literal:
+        return tuple({type(v) for v in get_args(hint)})
+    if isinstance(hint, type) and issubclass(hint, Enum):
+        return tuple({type(member.value) for member in hint})
+    return None
+
+
+def is_valid_scalar(
+    hint: type | None, allowed: type | UnionType, *, forbid_bool: bool = False
+) -> bool:
+    """Checks whether `hint` (a type, `Literal[...]`, or `Enum` subclass) matches `allowed`."""
+    value_types = scalar_value_types(hint)
+    if value_types is None:
+        if not isinstance(hint, type) or get_origin(hint) is not None:
+            return False
+        value_types = (hint,)
+    if not value_types:
+        return False
+    if forbid_bool and any(issubclass(t, bool) for t in value_types):
+        return False
+    return all(issubclass(t, allowed) for t in value_types)
+
+
 def is_scalar_sequence(hint: type | None) -> bool:
     """Checks whether `hint` is a `list`, `tuple`, or `Sequence` of scalar `ParamValue` objects."""
     if get_origin(hint) not in (list, tuple, Sequence):
         return False
     item_types = [a for a in get_args(hint) if a is not Ellipsis]
-    return bool(item_types) and all(
-        isinstance(a, type) and issubclass(a, ParamValue) for a in item_types
-    )
+    return bool(item_types) and all(is_valid_scalar(a, ParamValue) for a in item_types)
 
 
 def validate_scalar_arg(
@@ -30,7 +54,7 @@ def validate_scalar_arg(
     """Verifies that `Query`,`Field`, `Header`, or `Cookie` arguments have a scalar type."""
     if allow_sequence and is_scalar_sequence(scalar_type):
         return
-    if not isinstance(scalar_type, type) or not issubclass(scalar_type, ParamValue):
+    if not is_valid_scalar(scalar_type, ParamValue):
         allowed = "str | int | float | bool"
         if allow_sequence:
             allowed += " | Sequence[str | int | float | bool]"
@@ -99,11 +123,7 @@ class Path(Marker):
     @staticmethod
     def validate(py_name: str, path_type: type | None, is_optional: bool, param: Parameter) -> None:
         """Verifies that path arguments have the correct type."""
-        if (
-            not isinstance(path_type, type)
-            or issubclass(path_type, bool)
-            or not issubclass(path_type, ValidPath_T)
-        ):
+        if not is_valid_scalar(path_type, ValidPath_T, forbid_bool=True):
             raise TypeError(f"Path argument {py_name!r} must be str | int | float")
         if param.default is None:
             raise TypeError(f"Path argument {py_name!r} must not default to None")
@@ -115,9 +135,14 @@ class Query(Marker):
     """Binds a parameter to an URL query string parameter, omitting `None` values."""
 
     @classmethod
-    def validate(cls, name: str, resolved_hint: type | None) -> None:
-        """Verifies that a `Query` argument is a scalar and or a sequence of scalars."""
-        validate_scalar_arg(name, resolved_hint, cls.__name__, allow_sequence=True)
+    def validate(
+        cls, name: str, resolved_hint: type | None, *, allow_sequence: bool = True
+    ) -> None:
+        """Verifies that a `Query` argument is a scalar and or a sequence of scalars.
+
+        `allow_sequence` is `False` for inline queries.
+        """
+        validate_scalar_arg(name, resolved_hint, cls.__name__, allow_sequence=allow_sequence)
 
 
 class Field(Marker):
@@ -142,7 +167,7 @@ class Part(Marker):
 
     @staticmethod
     def validate(py_name: str, part_type: type | None) -> None:
-        """Verifies that a `Part` argument matches one of `httpx`'s accepted file-upload shapes.
+        """Verifies that a `Part` argument matches one of the file-upload shapes `httpx` accepts.
 
         `part_type` may be a `Union` of accepted shapes (e.g. the `PartValue` alias), so every
         union member must be individually valid.
