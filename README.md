@@ -45,15 +45,15 @@ new = shop.create_item(item=NewItem(name="Gadget", price=4.5))
 
 The method body is never run as it is replaced by the decorator. Parameters are bound based on their `Annotated[...]` marker:
 
-| Marker class         | Request Target      | Info                                                                                                                                                                      |
+| Marker class | Request Target | Info |
 |----------------------|---------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `Path` (or implicit) | Path                | Matched by parameter name unless annotated explicitly (`Path["name"]`). Must be a non-nullable `str`, `int`, or `float`.                                                  |
-| `Query`              | Query               | Must be a nullable `str`, `int`, `float`, or `bool`, or a `Sequence` of those, sent as `key=a&key=b&...`.                                                                 |
-| `Field`              | Form Field          | `application/x-www-form-urlencoded`. Accepts same types as `Query`.                                                                                                       |
-| `Part`               | Multipart File Part | Forces the whole request to be multipart and any `Field` params on the same call will become multipart fields as well. Accepts the same types `httpx` takes for `files=`. |
-| `Header`             | HTTP Header         | Must be `str`, `int`, `float`, or `bool`, but no list of those.                                                                                                           |
-| `Cookie`             | Cookie              | Is superseded by the cookie jar of the client if it already has a same-named cookie, unless `override=True` is set. Accepts same types as `Header`                        |
-| `Body`               | JSON Body           | Whole object, serialized with `msgspec.to_builtins`. Can't be a scalar type.                                                                                              |
+| `Path` (or implicit) | Path | Matched by parameter name unless annotated explicitly (`Path["name"]`). Must be a non-nullable `str`, `int`, or `float`. |
+| `Query` | Query | Must be a nullable `str`, `int`, `float`, or `bool`, or a `Sequence` of those, sent as `key=a&key=b&...`. |
+| `Field` | Form Field | `application/x-www-form-urlencoded`. Accepts same types as `Query`. |
+| `Part` | Multipart File Part | Forces the whole request to be multipart and any `Field` params on the same call will become multipart fields as well. Accepts the same types `httpx` takes for `files=`. |
+| `Header` | HTTP Header | Must be `str`, `int`, `float`, or `bool`, but no list of those. |
+| `Cookie` | Cookie | Is superseded by the cookie jar of the client if it already has a same-named cookie, unless `override=True` is set. Accepts same types as `Header` |
+| `Body` | JSON Body | Whole object, serialized with `msgspec.to_builtins`. Can't be a scalar type. |
 
 - Use `Path["name"]`, `Query["name"]`, `Field["name"]`, `Header["name"]`, or `Cookie["name"]` to bind under a different name than the parameter (e.g. reserved `from`, or a header like `X-Request-Id`, unsupported string format arguments like `?`).
 - `None`-valued `Query`, `Field`, `Header`, and `Cookie` parameters are omitted from the request.
@@ -84,6 +84,7 @@ class Shop(SyncConsumer):
 ### Decoding the response
 
 The return type defines the reponse decoding:
+
 - `httpx.Response` for the raw response.
 - `str` or `bytes` for the corresponding `.text` or `.content` with no JSON round-trip.
 - `pydantic.BaseModel` subclasses via their own `.model_validate_json`.
@@ -175,6 +176,7 @@ for event in chat.events():
 ```
 
 `Event` has four attributes, `data`, `event`, `id`, and `retry`:
+
 - `data` is the raw payload, decode it manually if the server sends JSON.
 - Multi-line `data` fields are joined with `\n`.
 - `id` and `retry` persist across events once set and reset on reconnect only.

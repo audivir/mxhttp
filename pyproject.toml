@@ -6,24 +6,30 @@ build-backend = "pdm.backend"
 name = "mxhttp"
 dynamic = ["version"]
 description = "Simple HTTP API consumer based on `httpx` and `msgspec`."
+authors = [{ name = "Tim Hörmann", email = "pypi@audivir.de" }]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.15"
 license = "MIT"
-keywords = ["http", "httpx", "msgspec", "rest", "api", "client", "declarative", "typing"]
+keywords = [
+  "http",
+  "httpx",
+  "msgspec",
+  "rest",
+  "api",
+  "client",
+  "declarative",
+  "typing",
+]
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
-    "Typing :: Typed",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
 ]
-dependencies = [
-    "httpx",
-    "msgspec",
-    "typing-extensions",
-]
+dependencies = ["httpx", "msgspec", "typing-extensions"]
 
 [project.optional-dependencies]
 pydantic = ["pydantic"]
@@ -34,7 +40,16 @@ Repository = "https://github.com/audivir/mxhttp"
 Issues = "https://github.com/audivir/mxhttp/issues"
 
 [dependency-groups]
-dev = ["mypy", "pytest", "pytest-mypy-testing", "coverage", "attrs", "pydantic", "prek", "ruff==0.16.4"]
+dev = [
+  "mypy==2.3.1",
+  "pytest",
+  "coverage",
+  "prek",
+  "ruff==0.16.4",
+  "pytest-mypy-testing",
+  "attrs",
+  "pydantic",
+]
 
 [tool.pdm.version]
 source = "file"
@@ -46,21 +61,12 @@ disable_error_code = "import-untyped"
 enable_error_code = """type-arg,no-untyped-def,redundant-cast,redundant-self,comparison-overlap,
                     no-untyped-call,no-any-return,no-any-unimported,unreachable,deprecated,redundant-expr,
                     possibly-undefined,truthy-bool,truthy-iterable,ignore-without-code,
-                    unused-awaitable,unused-ignore,explicit-override,unimported-reveal,mutable-override,unimported-reveal,explicit-any"""
+                    unused-awaitable,unused-ignore,explicit-override,unimported-reveal,mutable-override,explicit-any"""
 
-# untyped definitions and calls
-disallow_untyped_calls = true
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
-check_untyped_defs = true
-disallow_untyped_decorators = true
-
-# configuring warnings
-warn_redundant_casts = true
-warn_unused_ignores = true
-warn_no_return = true
-warn_return_any = true
+# beyond strict
 warn_unreachable = true
+warn_unused_configs = true
+local_partial_types = true
 
 exclude = ["build", "docs", "tests/test_type_errors.py"]
 
@@ -68,12 +74,17 @@ exclude = ["build", "docs", "tests/test_type_errors.py"]
 source = ["tests", "mxhttp"]
 command_line = "-m pytest"
 branch = true
-# custom
 patch = ["subprocess"]
 
 [tool.coverage.report]
-omit = ["_types.py"]
-exclude_also = ["if TYPE_CHECKING:", 'if __name__ == "__main__"', "@overload", "\\.\\.\\."]
+omit = ["_types.py", "tests/benchmark.py"]
+exclude_also = [
+  "if TYPE_CHECKING:",
+  'if __name__ == "__main__"',
+  "from __future__ import annotations",
+  "@overload",
+  "\\.\\.\\.",
+]
 fail_under = 100
 show_missing = true
 
@@ -86,7 +97,6 @@ filterwarnings = [
   "error",
   "ignore::pytest.PytestCacheWarning",
   "ignore::DeprecationWarning",
-  "ignore::SyntaxWarning:srtm",
 ]
 testpaths = ["tests"]
 
@@ -106,22 +116,22 @@ dummy-variable-rgx = "^(dummy_.*|unused_.*|_)$"
 select = ["ALL"]
 
 ignore = [
-  "CPY001", # Missing copyright notice at top of file
+  "CPY001",  # Missing copyright notice at top of file
   "PLC0415", # `import` should be at the top-level of a file
-  "ISC001", # implicit-str-concat
-  "COM812", # missing-trailing-comma
-  "S301", # `pickle` and modules that wrap it can be unsafe when used to deserialize untrusted data, possible security issue
-  "TD003",  # Missing issue link on the line following this TODO
-  "FIX002", # Line contains TODO, consider resolving the issue
-  "FBT001", # Boolean-typed positional argument in function definition
-  "FBT002", # Boolean default positional argument
-  "FBT003", # Boolean positional value in function call
-  "ANN401", # Dynamically typed expressions (typing.Any) are disallowed in `**kwargs`
-  "EM101",  # Exception must not use a string literal, assign to variable first
-  "EM102",  # Exception must not use an f-string literal, assign to variable first
-  "TRY003", # Avoid specifying long messages outside the exception class
-  "TRY300", # Use of else blocks in try/except
-  "D105", # Missing docstring in magic method
+  "ISC001",  # implicit-str-concat
+  "COM812",  # missing-trailing-comma
+  "S301",    # `pickle` and modules that wrap it can be unsafe when used to deserialize untrusted data, possible security issue
+  "TD003",   # Missing issue link on the line following this TODO
+  "FIX002",  # Line contains TODO, consider resolving the issue
+  "FBT001",  # Boolean-typed positional argument in function definition
+  "FBT002",  # Boolean default positional argument
+  "FBT003",  # Boolean positional value in function call
+  "ANN401",  # Dynamically typed expressions (typing.Any) are disallowed in `**kwargs`
+  "EM101",   # Exception must not use a string literal, assign to variable first
+  "EM102",   # Exception must not use an f-string literal, assign to variable first
+  "TRY003",  # Avoid specifying long messages outside the exception class
+  "TRY300",  # Use of else blocks in try/except
+  "D105",    # Missing docstring in magic method
 ]
 
 [tool.ruff.lint.pydocstyle]
@@ -130,6 +140,9 @@ convention = "google"
 [tool.ruff.lint.isort]
 required-imports = ["from __future__ import annotations"]
 split-on-trailing-comma = false
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
 
 [tool.ruff.lint.per-file-ignores]
 # Stub files for C extensions are allowed to have docstrings and overwrite __doc__, __version__, etc.
