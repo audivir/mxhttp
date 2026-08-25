@@ -1,4 +1,4 @@
-"""Processing steps for the raw `httpx.Reponse`."""
+"""Processing steps for a raw `httpx.Response`."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def decode(response: httpx.Response, return_type: type[Parsed_T]) -> Parsed_T: .
 def decode(  # noqa: PLR0911
     response: httpx.Response, return_type: type[Parsed_T | None]
 ) -> Parsed_T | None:
-    """Decodes a HTTP response into the specified return type.
+    """Decodes an HTTP response into the specified return type.
 
     `httpx.Response` passes through, `str` and `bytes` use `.text` and `.content` directly,
     `None` discards the body without decoding it, and `pydantic.BaseModel` subclasses
@@ -71,7 +71,7 @@ def decode(  # noqa: PLR0911
 
 
 def apply_response_handler(self: BaseConsumer, response: httpx.Response) -> httpx.Response:
-    """Applies the response hook, defaults to `raise_for_status` if none is set."""
+    """Applies the response hook, or calls `raise_for_status` if unset."""
     if self._response_handler:
         return self._response_handler(response)
     return response.raise_for_status()
@@ -80,7 +80,7 @@ def apply_response_handler(self: BaseConsumer, response: httpx.Response) -> http
 def apply_streaming_response_handler(
     self: BaseConsumer, response: httpx.Response
 ) -> httpx.Response:
-    """Applies the streaming response hook, defaults to `raise_for_status` if unset.
+    """Applies the streaming response hook, or calls `raise_for_status` if unset.
 
     Only the status line and headers are available at this point.
     """
@@ -125,7 +125,7 @@ def stream_sync(self: SyncConsumer, spec: RequestSpec) -> Iterator[bytes]:
     """Streams the response body in chunks instead of buffering it.
 
     Runs the `@streaming_response_handler` hook before yielding events.
-    Any incomplete event when the stream ends is discarded.
+    Discards any incomplete event when the stream ends.
     """
     with self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response:
         apply_streaming_response_handler(self, response)
@@ -136,7 +136,7 @@ async def stream_async(self: AsyncConsumer, spec: RequestSpec) -> AsyncIterator[
     """Streams the response body in chunks instead of buffering it.
 
     Runs the `@streaming_response_handler` hook before yielding events.
-    Any incomplete event when the stream ends is discarded.
+    Discards any incomplete event when the stream ends.
     """
     async with self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response:
         apply_streaming_response_handler(self, response)
@@ -148,7 +148,7 @@ def sse_sync(self: SyncConsumer, spec: RequestSpec) -> Iterator[Event]:
     """Streams the response as parsed Server-Sent Events.
 
     Runs the `@streaming_response_handler` hook before yielding events.
-    Any incomplete event when the stream ends is discarded.
+    Discards any incomplete event when the stream ends.
     """
     builder = SseBuilder()
     with self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response:
@@ -163,7 +163,7 @@ async def sse_async(self: AsyncConsumer, spec: RequestSpec) -> AsyncIterator[Eve
     """Streams the response as parsed Server-Sent Events.
 
     Runs the `@streaming_response_handler` hook before yielding events.
-    Any incomplete event when the stream ends is discarded.
+    Discards any incomplete event when the stream ends.
     """
     builder = SseBuilder()
     async with self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response:

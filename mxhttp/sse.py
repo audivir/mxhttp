@@ -15,7 +15,7 @@ class Event(msgspec.Struct):
     """Stores a parsed Server-Sent Event."""
 
     data: str = ""
-    """The raw payload."""
+    """Raw event payload."""
     event: str = "message"
     id: str | None = None
     retry: int | None = None

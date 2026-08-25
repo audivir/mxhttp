@@ -1,4 +1,4 @@
-"""Tests for the inline query parsing."""
+"""Tests for the inline query parsing module."""
 
 from __future__ import annotations
 

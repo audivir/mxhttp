@@ -1,4 +1,4 @@
-"""Test the decoding and response handling."""
+"""Tests for decoding and response handling."""
 
 from __future__ import annotations
 

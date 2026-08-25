@@ -1,4 +1,4 @@
-"""Tests for path template parsing."""
+"""Tests for the path template parsing module."""
 
 from __future__ import annotations
 

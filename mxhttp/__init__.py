@@ -6,10 +6,11 @@ from mxhttp.consumer import AsyncConsumer, SyncConsumer
 from mxhttp.endpoint import delete, endpoint, get, head, patch, post, put
 from mxhttp.markers import Body, Cookie, Field, Header, Part, Path, Query
 from mxhttp.response import Response, response_handler, streaming_response_handler
+from mxhttp.retry import Retry, retry
 from mxhttp.sse import Event
 from mxhttp.types import PartValue
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 __all__ = [
     "AsyncConsumer",
@@ -23,6 +24,7 @@ __all__ = [
     "Path",
     "Query",
     "Response",
+    "Retry",
     "SyncConsumer",
     "delete",
     "endpoint",
@@ -32,5 +34,6 @@ __all__ = [
     "post",
     "put",
     "response_handler",
+    "retry",
     "streaming_response_handler",
 ]

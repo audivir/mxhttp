@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
     import httpx
 
+    from mxhttp.retry import Retry
     from mxhttp.types import ResponseHandler
 
 
@@ -19,6 +20,7 @@ class BaseConsumer:
 
     _response_handler: ResponseHandler | None = None
     _streaming_response_handler: ResponseHandler | None = None
+    _retry: Retry | None = None
 
     def __init__(self, base_url: str, *, use_async: bool = False) -> None:
         """Initializes the client bound to `base_url` with an empty header dict."""

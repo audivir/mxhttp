@@ -113,6 +113,33 @@ class Shop(SyncConsumer): ...
 
 The hook runs on every response before decoding.
 
+### Retries
+
+Configure automatic retries with exponential backoff via `@retry` on the class, so individual endpoints don't need to hand-roll their own retry loop:
+
+```python
+from mxhttp import Retry, SyncConsumer, get, retry
+
+
+@retry(Retry(attempts=3, statuses={429, 500, 502, 503, 504}))
+class Shop(SyncConsumer):
+    @get("/items/{item_id}")
+    def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
+```
+
+- The last attempt's response (still checked by the response handler) or exception is what's ultimately raised/returned.
+- Only applies to regular (non-streaming, non-SSE) endpoints.
+- Pass `retry=` directly to `@get`/`@post`/etc. to override the class's `Retry` config for that one endpoint, or `retry=None` to disable retries for it:
+
+```python
+class Shop(SyncConsumer):
+    @get("/items/{item_id}", retry=Retry(attempts=5))
+    def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
+
+    @post("/items", retry=None)
+    def create_item(self, item: Annotated[NewItem, Body]) -> Item: ...  # type: ignore[empty-body]
+```
+
 ### Streaming responses
 
 Annotate the return type as `Iterator[bytes]` (sync) or `AsyncIterator[bytes]` (async) to stream the response body in chunks.

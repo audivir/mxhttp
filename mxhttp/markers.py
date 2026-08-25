@@ -51,7 +51,7 @@ def is_scalar_sequence(hint: type | None) -> bool:
 def validate_scalar_arg(
     py_name: str, scalar_type: type | None, marker_name: str, *, allow_sequence: bool = False
 ) -> None:
-    """Verifies that `Query`,`Field`, `Header`, or `Cookie` arguments have a scalar type."""
+    """Verifies that `Query`, `Field`, `Header`, or `Cookie` arguments have a scalar type."""
     if allow_sequence and is_scalar_sequence(scalar_type):
         return
     if not is_valid_scalar(scalar_type, ParamValue):
@@ -118,7 +118,7 @@ class Marker:
 
 
 class Path(Marker):
-    """Binds a parameter to an URL path parameter."""
+    """Binds a parameter to a URL path parameter."""
 
     @staticmethod
     def validate(py_name: str, path_type: type | None, is_optional: bool, param: Parameter) -> None:
@@ -132,16 +132,13 @@ class Path(Marker):
 
 
 class Query(Marker):
-    """Binds a parameter to an URL query string parameter, omitting `None` values."""
+    """Binds a parameter to a URL query string parameter, omitting `None` values."""
 
     @classmethod
     def validate(
         cls, name: str, resolved_hint: type | None, *, allow_sequence: bool = True
     ) -> None:
-        """Verifies that a `Query` argument is a scalar and or a sequence of scalars.
-
-        `allow_sequence` is `False` for inline queries.
-        """
+        """Verifies that a `Query` argument is a scalar or a sequence of scalars."""
         validate_scalar_arg(name, resolved_hint, cls.__name__, allow_sequence=allow_sequence)
 
 
@@ -154,7 +151,7 @@ class Field(Marker):
 
     @classmethod
     def validate(cls, name: str, resolved_hint: type | None) -> None:
-        """Verifies that a `Field` argument is a scalar and or a sequence of scalars."""
+        """Verifies that a `Field` argument is a scalar or a sequence of scalars."""
         validate_scalar_arg(name, resolved_hint, cls.__name__, allow_sequence=True)
 
 
@@ -167,11 +164,7 @@ class Part(Marker):
 
     @staticmethod
     def validate(py_name: str, part_type: type | None) -> None:
-        """Verifies that a `Part` argument matches one of the file-upload shapes `httpx` accepts.
-
-        `part_type` may be a `Union` of accepted shapes (e.g. the `PartValue` alias), so every
-        union member must be individually valid.
-        """
+        """Verifies that a `Part` argument matches one of the file-upload shapes `httpx` accepts."""
         candidates = (
             get_args(part_type) if get_origin(part_type) in (Union, UnionType) else [part_type]
         )
@@ -214,11 +207,11 @@ class Cookie(Marker):
 
 
 class Body:
-    """Binds a whole JSON-encodable parameter as the JSON request body."""
+    """Binds a JSON-encodable parameter as the JSON request body."""
 
     @staticmethod
     def validate(py_name: str, body_type: type | None) -> None:
-        """Verifies that a `Body` argument is a object, not just a scalar."""
+        """Verifies that a `Body` argument is an object, not a scalar."""
         if isinstance(body_type, type) and issubclass(body_type, (*get_args(ParamValue), bytes)):
             raise TypeError(
                 f"Body argument {py_name!r} must not be str | int | float | bool | bytes"

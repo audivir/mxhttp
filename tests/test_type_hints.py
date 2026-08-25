@@ -1,4 +1,4 @@
-"""Tests for mxhttp consumer and endpoint decorator type checking."""
+"""Tests for the mxhttp consumer and endpoint decorator type checking."""
 
 from __future__ import annotations
 

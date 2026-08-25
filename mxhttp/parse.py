@@ -9,7 +9,7 @@ from typing import NamedTuple
 
 
 class ParsedPath(NamedTuple):
-    """Pieces of a path template split by `split_path_template()`."""
+    """Stores the components of a path template split by `split_path_template()`."""
 
     path_only: str
     static_query: dict[str, str]
@@ -17,17 +17,17 @@ class ParsedPath(NamedTuple):
 
 
 def reescape(literal_text: str) -> str:
-    """Re-escapes braces `str.Formatter().parse()` unescaped."""
+    """Re-escapes braces that `str.Formatter().parse()` unescaped."""
     return literal_text.replace("{", "{{").replace("}", "}}")
 
 
 def unescape(text: str) -> str:
-    """Undoes `reescape()`."""
+    """Reverses the escaping applied by `reescape()`."""
     return text.replace("{{", "{").replace("}}", "}")
 
 
 def split_path_template(path: str) -> ParsedPath:  # noqa: C901, PLR0912
-    """Splits a path template into its path portion and its query string, if any.
+    """Splits a path template into its path portion and query string, if any.
 
     Returns:
         `ParsedPath` of the bare path, static `key: value` query entries, and `py_name:

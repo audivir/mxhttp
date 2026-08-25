@@ -1,4 +1,4 @@
-"""Test the SSE parsing and error checking."""
+"""Tests for SSE parsing and error checking."""
 
 from __future__ import annotations
 

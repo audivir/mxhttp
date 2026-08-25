@@ -43,7 +43,7 @@ Parsed_T = TypeVar(
 """Raw response, raw content, dataclass-like structures, or JSON-decodable types."""
 
 Param_T: TypeAlias = Literal["path", "body", "query", "field", "part", "header", "cookie"]
-"""HTTP request parameters."""
+"""HTTP request parameter names."""
 
 Method_T: TypeAlias = Literal["DELETE", "GET", "HEAD", "PATCH", "POST", "PUT"]
 """HTTP methods."""
@@ -75,5 +75,5 @@ ResponseHandler: TypeAlias = "Callable[[httpx.Response], httpx.Response]"
 
 
 def is_parsed_type(return_type: type[Parsed_T | None]) -> TypeIs[type[Parsed_T]]:
-    """Check whether the `return_type` is not `NoneType`."""
+    """Checks whether `return_type` is not `NoneType`."""
     return return_type is not type(None)

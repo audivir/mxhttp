@@ -1,4 +1,4 @@
-"""Tests for mxhttp type-checking error diagnostics."""
+"""Tests for the mxhttp type-checking error diagnostics module."""
 
 from __future__ import annotations
 

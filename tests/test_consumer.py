@@ -1,4 +1,4 @@
-"""Tests for consumer closing."""
+"""Tests for the consumer closing module."""
 
 from __future__ import annotations
 

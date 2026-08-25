@@ -1,4 +1,4 @@
-"""Defines models for mxhttp API tests."""
+"""Defines models for the mxhttp API tests module."""
 
 from __future__ import annotations
 

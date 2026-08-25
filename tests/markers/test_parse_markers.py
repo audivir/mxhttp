@@ -1,4 +1,4 @@
-"""Test for the handling for all markers besides `Path`."""
+"""Tests for all marker types other than `Path`."""
 
 from __future__ import annotations
 

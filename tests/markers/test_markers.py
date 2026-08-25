@@ -1,4 +1,4 @@
-"""Test the marker handling."""
+"""Tests for the marker handling functions."""
 
 from __future__ import annotations
 

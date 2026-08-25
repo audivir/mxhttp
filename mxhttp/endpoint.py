@@ -1,4 +1,4 @@
-"""Creates the endpoint wrapped function."""
+"""Creates a wrapped endpoint function."""
 
 from __future__ import annotations
 
@@ -26,12 +26,15 @@ from mxhttp.response import (
     stream_async,
     stream_sync,
 )
+from mxhttp.retry import request_async, request_sync
 from mxhttp.sse import Event
+from mxhttp.types import MISSING
 
 if TYPE_CHECKING:
     from mxhttp import AsyncConsumer, SyncConsumer
     from mxhttp.consumer import BaseConsumer
-    from mxhttp.types import AnyC_T, AsyncC_T, Method_T, Parsed_T, SyncC_T
+    from mxhttp.retry import Retry
+    from mxhttp.types import AnyC_T, AsyncC_T, Method_T, Missing, Parsed_T, SyncC_T
 
 P = ParamSpec("P")
 
@@ -84,8 +87,17 @@ class EndpointDecorator(Protocol):
     ) -> Callable[Concatenate[AsyncC_T, P], Coroutine[Any, Any, AsyncIterator[Event]]]: ...
 
 
-def endpoint(method: Method_T, path: str) -> EndpointDecorator:  # noqa: C901
-    """Shared implementation for the HTTP method decorator factories."""
+def endpoint(  # noqa: C901
+    method: Method_T, path: str, retry: Retry | Missing | None = MISSING
+) -> EndpointDecorator:
+    """Shared implementation for the HTTP method decorator factories.
+
+    Args:
+        method: HTTP method to use to call the endpoint.
+        path: The relative endpoint.
+        retry: Overrides the class-level `Retry` config for this endpoint only.
+            Pass `None` explicitly to disable retries for this endpoint only.
+    """
 
     def decorate(  # noqa: C901
         func: Callable[Concatenate[AnyC_T, P], Parsed_T]
@@ -109,6 +121,10 @@ def endpoint(method: Method_T, path: str) -> EndpointDecorator:  # noqa: C901
             bound.apply_defaults()
             jar = dict(self.session.cookies) if has_cookies else None
             return build_request(method, parsed, plan, bound.arguments, jar=jar)
+
+        def resolve_retry(self: BaseConsumer) -> Retry | None:
+            """Resolves the endpoint retry override, falling back to the consumer default."""
+            return self._retry if retry is MISSING else retry
 
         if inspect.iscoroutinefunction(func):
             if is_sse_stream:
@@ -138,7 +154,7 @@ def endpoint(method: Method_T, path: str) -> EndpointDecorator:  # noqa: C901
                 self: AsyncConsumer, *args: P.args, **kwargs: P.kwargs
             ) -> Parsed_T:
                 spec = resolve_spec(self, *args, **kwargs)
-                response = await self.session.request(spec.method, spec.url, **spec.to_kwargs())
+                response = await request_async(self, spec, resolve_retry(self))
                 return decode(apply_response_handler(self, response), return_type)
 
             return async_wrapper  # type: ignore[return-value]
@@ -172,7 +188,7 @@ def endpoint(method: Method_T, path: str) -> EndpointDecorator:  # noqa: C901
             **kwargs: P.kwargs,
         ) -> Parsed_T:
             spec = resolve_spec(self, *args, **kwargs)
-            response = self.session.request(spec.method, spec.url, **spec.to_kwargs())
+            response = request_sync(self, spec, resolve_retry(self))
             return decode(apply_response_handler(self, response), return_type)
 
         return sync_wrapper  # type: ignore[return-value]
@@ -182,41 +198,47 @@ def endpoint(method: Method_T, path: str) -> EndpointDecorator:  # noqa: C901
 
 def get(
     path: str,
+    retry: Retry | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `GET {path}`."""
-    return endpoint("GET", path)
+    return endpoint("GET", path, retry)
 
 
 def post(
     path: str,
+    retry: Retry | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `POST {path}`."""
-    return endpoint("POST", path)
+    return endpoint("POST", path, retry)
 
 
 def put(
     path: str,
+    retry: Retry | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `PUT {path}`."""
-    return endpoint("PUT", path)
+    return endpoint("PUT", path, retry)
 
 
 def patch(
     path: str,
+    retry: Retry | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `PATCH {path}`."""
-    return endpoint("PATCH", path)
+    return endpoint("PATCH", path, retry)
 
 
 def delete(
     path: str,
+    retry: Retry | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `DELETE {path}`."""
-    return endpoint("DELETE", path)
+    return endpoint("DELETE", path, retry)
 
 
 def head(
     path: str,
+    retry: Retry | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `HEAD {path}`."""
-    return endpoint("HEAD", path)
+    return endpoint("HEAD", path, retry)

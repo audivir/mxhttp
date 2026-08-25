@@ -1,4 +1,4 @@
-"""Builds the `httpx.Request`."""
+"""Builds an `httpx.Request`."""
 
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ class RequestSpec(msgspec.Struct):
 
 
 def scalar_str(value: object) -> str:
-    """Converts a scalar value to a string, using `.value` from `Enum` object."""
+    """Converts a scalar value to a string, using the `.value` attribute of `Enum` objects."""
     if isinstance(value, Enum):
         value = value.value
     return str(value)
@@ -112,12 +112,12 @@ def resolve_inline_query(
     """Resolves an explicit `Query[...]` marker against an inline query field, if it names one.
 
     Returns:
-        The resolved `(wire_name, marker)` pair, or `None` if the marker doesn't name an inline
+        The resolved `(wire_name, marker)` pair, or `None` if the marker does not name an inline
         query field.
 
     Raises:
-        TypeError: If the marker targets wire name of an inline field directly instead of its
-            placeholder name, which would bypass own validation of the field.
+        TypeError: If the marker targets the wire name of an inline field directly instead of its
+            placeholder name, which would bypass validation of the field.
     """
     lookup_name = marker.name or name
     if lookup_name in inline_query_names:
@@ -138,7 +138,7 @@ def classify(  # noqa: C901
     inline_query_names: Mapping[str, str],
     param: Parameter,
 ) -> tuple[str, Marker | type[Body]]:
-    """Resolves the binding of a parameter: with explicit marker or implicit path/inline query."""
+    """Resolves the binding of a parameter via an explicit marker or implicit path/inline query."""
     resolved_hint, is_optional, markers = unwrap_hint(hint)
     for extra in markers:  # pragma: no branch
         marker = extra() if extra in (Path, Query, Field, Part, Header, Cookie) else extra
@@ -172,7 +172,7 @@ def classify(  # noqa: C901
 
 
 def rejects_union(return_type: type) -> bool:
-    """A bare union, or `Response[...]` wrapping one directly, is not decodable."""
+    """Checks whether a bare union, or `Response[...]` wrapping one, is not decodable."""
     if get_origin(return_type) in (Union, UnionType):
         return True
     if get_origin(return_type) is Response:
