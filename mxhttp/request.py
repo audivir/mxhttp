@@ -22,7 +22,18 @@ from typing import (
 
 import msgspec
 
-from mxhttp.markers import Body, Cookie, Field, Header, Marker, Part, Path, Query, unwrap_optional
+from mxhttp.markers import (
+    Body,
+    Cookie,
+    Field,
+    Header,
+    Marker,
+    Part,
+    Path,
+    Query,
+    RawPath,
+    unwrap_optional,
+)
 from mxhttp.response import Response
 from mxhttp.types import MISSING, AnyC_T, JsonValue, Param_T, Parsed_T, PartValue, QueryValue
 
@@ -41,6 +52,7 @@ class ParamPlan(msgspec.Struct):
     wire_name: str
     kind: Param_T
     cookie_override: bool = False
+    raw_path: bool = False
 
 
 class RequestKwargs(TypedDict):
@@ -58,11 +70,11 @@ class RequestSpec(msgspec.Struct):
 
     method: str
     url: str
-    params: dict[str, QueryValue] | None
-    headers: dict[str, str] | None
-    data: dict[str, object] | None
-    files: dict[str, PartValue] | None
-    json: JsonValue
+    params: dict[str, QueryValue] | None = None
+    headers: dict[str, str] | None = None
+    data: dict[str, object] | None = None
+    files: dict[str, PartValue] | None = None
+    json: JsonValue = None
 
     def to_kwargs(self) -> RequestKwargs:
         """Builds the keyword arguments shared by every `session.request`/`session.stream` call."""
@@ -141,7 +153,7 @@ def classify(  # noqa: C901
     """Resolves the binding of a parameter via an explicit marker or implicit path/inline query."""
     resolved_hint, is_optional, markers = unwrap_hint(hint)
     for extra in markers:  # pragma: no branch
-        marker = extra() if extra in (Path, Query, Field, Part, Header, Cookie) else extra
+        marker = extra() if extra in (Path, RawPath, Query, Field, Part, Header, Cookie) else extra
         if isinstance(marker, Path):
             lookup_name = marker.name or name
             if lookup_name not in path_parts:
@@ -241,7 +253,11 @@ def build_plan(  # noqa: C901, PLR0912
         cookie_override = marker.override if isinstance(marker, Cookie) else False
         plan.append(
             ParamPlan(
-                py_name=py_name, wire_name=wire_name, kind=kind, cookie_override=cookie_override
+                py_name=py_name,
+                wire_name=wire_name,
+                kind=kind,
+                cookie_override=cookie_override,
+                raw_path=isinstance(marker, RawPath),
             )
         )
     bound_path_names = {p.wire_name for p in plan if p.kind == "path"}
@@ -271,6 +287,7 @@ def build_request(
         jar: Snapshot of the current cookie jar.
     """
     path_args: dict[str, object] = {}
+    raw_path_args: dict[str, object] = {}
     params: dict[str, QueryValue] = dict(parsed.static_query)
     headers: dict[str, str] = {}
     cookies: dict[str, str] = {}
@@ -280,7 +297,7 @@ def build_request(
     for p in plan:
         value = values.get(p.py_name)
         if p.kind == "path":
-            path_args[p.wire_name] = value
+            (raw_path_args if p.raw_path else path_args)[p.wire_name] = value
         elif value is None:
             continue  # None values are omitted for queries, fields, headers, and cookies
         elif p.kind == "query":
@@ -303,7 +320,8 @@ def build_request(
     return RequestSpec(
         method=method,
         url=parsed.path_only.format(
-            **{k: urllib.parse.quote(scalar_str(v), safe="") for k, v in path_args.items()}
+            **{k: urllib.parse.quote(scalar_str(v), safe="") for k, v in path_args.items()},
+            **{k: scalar_str(v) for k, v in raw_path_args.items()},
         ),
         params=params or None,
         headers=headers or None,

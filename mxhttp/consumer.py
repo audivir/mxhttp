@@ -22,15 +22,21 @@ class BaseConsumer:
     _streaming_response_handler: ResponseHandler | None = None
     _retry: Retry | None = None
 
-    def __init__(self, base_url: str, *, use_async: bool = False) -> None:
-        """Initializes the client bound to `base_url` with an empty header dict."""
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        use_async: bool = False,
+        timeout: float | httpx.Timeout = 5.0,
+    ) -> None:
+        """Initializes the client bound to `base_url`."""
         import httpx
 
         self.base_url = base_url.rstrip("/")
         self._session = (
-            httpx.AsyncClient(base_url=self.base_url)
+            httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
             if use_async
-            else httpx.Client(base_url=self.base_url)
+            else httpx.Client(base_url=self.base_url, timeout=timeout)
         )
 
     @override
@@ -46,9 +52,9 @@ class BaseConsumer:
 class SyncConsumer(BaseConsumer):
     """Base class for the synchronous declarative API client."""
 
-    def __init__(self, base_url: str) -> None:
-        """Initializes the client bound to `base_url` with an empty header dict."""
-        super().__init__(base_url, use_async=False)
+    def __init__(self, base_url: str, *, timeout: float | httpx.Timeout = 5.0) -> None:
+        """Initializes the client bound to `base_url`."""
+        super().__init__(base_url, use_async=False, timeout=timeout)
 
     def __enter__(self) -> Self:
         return self
@@ -73,9 +79,9 @@ class SyncConsumer(BaseConsumer):
 class AsyncConsumer(BaseConsumer):
     """Base class for the asynchronous declarative API client."""
 
-    def __init__(self, base_url: str) -> None:
-        """Initializes the client bound to `base_url` with an empty header dict."""
-        super().__init__(base_url, use_async=True)
+    def __init__(self, base_url: str, *, timeout: float | httpx.Timeout = 5.0) -> None:
+        """Initializes the client bound to `base_url`."""
+        super().__init__(base_url, use_async=True, timeout=timeout)
 
     async def __aenter__(self) -> Self:
         return self

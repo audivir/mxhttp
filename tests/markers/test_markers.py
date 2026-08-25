@@ -9,7 +9,7 @@ import httpx  # noqa: TC002
 import msgspec
 import pytest
 from conftest import make_consumer
-from models import ITEM, AsyncPathApi, Item, NewItem, PathApi
+from models import ITEM, AsyncPathApi, AsyncRawPathApi, Item, NewItem, PathApi, RawPathApi
 
 from mxhttp import (
     AsyncConsumer,
@@ -19,7 +19,9 @@ from mxhttp import (
     Header,
     Part,
     PartValue,
+    Path,
     Query,
+    RawPath,
     SyncConsumer,
     get,
     post,
@@ -194,6 +196,61 @@ def test_path_param_slash_is_escaped_not_injected_as_segment() -> None:
     assert result == ITEM
     # `.path` percent-decodes for display; `.raw_path` is the actually sent data
     assert seen[0].url.raw_path == b"/users/..%2Fadmin/posts/1"
+
+
+@pytest.mark.parametrize("cls", [RawPathApi, AsyncRawPathApi], ids=["sync", "async"])
+async def test_raw_path_splices_value_unescaped(*, cls: type[RawPathApi | AsyncRawPathApi]) -> None:
+    consumer, seen = make_consumer(cls, ITEM, track_requests=True)
+    raw = "/test/1/?query=1"
+
+    if isinstance(consumer, AsyncRawPathApi):
+        result = await consumer.fetch(raw=raw)
+    else:
+        result = consumer.fetch(raw=raw)
+
+    assert result == ITEM
+    # unlike `Path`, no character is percent-encoded; the raw value is still resolved
+    # against base_url like any other relative reference
+    assert str(seen[0].url) == f"https://api.example.com{raw}"
+
+
+def test_raw_path_rejects_non_str_type() -> None:
+    with pytest.raises(TypeError, match=r"RawPath argument 'raw' must be str"):
+
+        class BadApi(SyncConsumer):
+            @get("{raw}")
+            def fetch(self, raw: Annotated[int, RawPath]) -> Item: ...  # type: ignore[empty-body]
+
+
+def test_raw_path_none_default_raises_type_error() -> None:
+    with pytest.raises(TypeError, match=r"RawPath argument 'raw' must not default to None"):
+
+        class BadApi(SyncConsumer):
+            @get("{raw}")
+            def fetch(  # type: ignore[empty-body]
+                self,
+                raw: Annotated[str, RawPath] = None,  # type: ignore[assignment] # noqa: RUF013
+            ) -> Item: ...
+
+
+def test_raw_path_optional_raises_type_error() -> None:
+    with pytest.raises(TypeError, match=r"RawPath argument 'raw' must not be optional"):
+
+        class BadApi(SyncConsumer):
+            @get("{raw}")
+            def fetch(  # type: ignore[empty-body]
+                self, raw: Annotated[str, RawPath] | None
+            ) -> Item: ...
+
+
+def test_raw_path_and_path_cannot_share_a_wire_name() -> None:
+    with pytest.raises(TypeError, match=r"reuses path wire name 'seg'"):
+
+        class BadApi(SyncConsumer):
+            @get("/x/{seg}")
+            def fetch(  # type: ignore[empty-body]
+                self, a: Annotated[str, Path["seg"]], b: Annotated[str, RawPath["seg"]]
+            ) -> Item: ...
 
 
 @pytest.mark.parametrize("cls", [QueryApi, AsyncQueryApi], ids=["sync", "async"])

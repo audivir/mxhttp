@@ -48,6 +48,7 @@ class Retry(msgspec.Struct, frozen=True):
     exponent: float = 2.0
     jitter: bool = True
     max_delay: float = 30.0
+    timeout: float | httpx.Timeout | None = None
 
     def __post_init__(self) -> None:
         if self.attempts < 1:
@@ -71,6 +72,22 @@ def retry(config: Retry) -> Callable[[type[AnyC_T]], type[AnyC_T]]:
     return decorate
 
 
+def send_sync(self: SyncConsumer, spec: RequestSpec, config: Retry) -> httpx.Response:
+    """Sends `spec` once, applying `config.timeout` if one is set."""
+    if config.timeout is None:
+        return self.session.request(spec.method, spec.url, **spec.to_kwargs())
+    return self.session.request(spec.method, spec.url, timeout=config.timeout, **spec.to_kwargs())
+
+
+async def send_async(self: AsyncConsumer, spec: RequestSpec, config: Retry) -> httpx.Response:
+    """Sends `spec` once, applying `config.timeout` if one is set."""
+    if config.timeout is None:
+        return await self.session.request(spec.method, spec.url, **spec.to_kwargs())
+    return await self.session.request(
+        spec.method, spec.url, timeout=config.timeout, **spec.to_kwargs()
+    )
+
+
 def request_sync(self: SyncConsumer, spec: RequestSpec, config: Retry | None) -> httpx.Response:
     """Sends `spec`, retrying according to `config` if one is given."""
     if config is None:
@@ -79,7 +96,7 @@ def request_sync(self: SyncConsumer, spec: RequestSpec, config: Retry | None) ->
     attempt = 0
     while True:
         try:
-            response = self.session.request(spec.method, spec.url, **spec.to_kwargs())
+            response = send_sync(self, spec, config)
         except tuple(config.exceptions):
             attempt += 1
             if attempt >= config.attempts:
@@ -104,7 +121,7 @@ async def request_async(
     attempt = 0
     while True:
         try:
-            response = await self.session.request(spec.method, spec.url, **spec.to_kwargs())
+            response = await send_async(self, spec, config)
         except tuple(config.exceptions):
             attempt += 1
             if attempt >= config.attempts:

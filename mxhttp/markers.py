@@ -7,7 +7,7 @@ from enum import Enum
 from types import UnionType
 from typing import TYPE_CHECKING, Literal, Union, get_args, get_origin
 
-from typing_extensions import Self
+from typing_extensions import Self, override
 
 from mxhttp.types import ParamValue, ValidPath_T
 
@@ -129,6 +129,26 @@ class Path(Marker):
             raise TypeError(f"Path argument {py_name!r} must not default to None")
         if is_optional:
             raise TypeError(f"Path argument {py_name!r} must not be optional")
+
+
+class RawPath(Path):
+    """Binds a `str` path parameter without percent-encoding it.
+
+    The value is spliced into the URL as-is, so `/`, `?`, and `#` are treated as URL
+    structure rather than literal text. Use only for values that are already encoded
+    relative paths or query fragments.
+    """
+
+    @override
+    @staticmethod
+    def validate(py_name: str, path_type: type | None, is_optional: bool, param: Parameter) -> None:
+        """Verifies that a `RawPath` argument is `str`."""
+        if path_type is not str:
+            raise TypeError(f"RawPath argument {py_name!r} must be str")
+        if param.default is None:
+            raise TypeError(f"RawPath argument {py_name!r} must not default to None")
+        if is_optional:
+            raise TypeError(f"RawPath argument {py_name!r} must not be optional")
 
 
 class Query(Marker):

@@ -10,7 +10,7 @@ import httpx  # noqa: TC002
 import msgspec
 from pydantic import BaseModel
 
-from mxhttp import AsyncConsumer, Body, SyncConsumer, delete, get, head, patch, post, put
+from mxhttp import AsyncConsumer, Body, RawPath, SyncConsumer, delete, get, head, patch, post, put
 
 
 class Item(msgspec.Struct):
@@ -20,6 +20,7 @@ class Item(msgspec.Struct):
 
 
 ITEM = Item(id=1, name="Widget", price=9.99)
+ITEM_BUILTINS = msgspec.to_builtins(ITEM)
 
 
 class NewItem(msgspec.Struct):
@@ -35,6 +36,16 @@ class PathApi(SyncConsumer):
 class AsyncPathApi(AsyncConsumer):
     @get("/users/{user_id}/posts/{post_id}")
     async def get_post(self, user_id: str, post_id: int) -> Item: ...  # type: ignore[empty-body]
+
+
+class RawPathApi(SyncConsumer):
+    @get("{raw}")
+    def fetch(self, raw: Annotated[str, RawPath]) -> Item: ...  # type: ignore[empty-body]
+
+
+class AsyncRawPathApi(AsyncConsumer):
+    @get("{raw}")
+    async def fetch(self, raw: Annotated[str, RawPath]) -> Item: ...  # type: ignore[empty-body]
 
 
 class CrudApi(SyncConsumer):
