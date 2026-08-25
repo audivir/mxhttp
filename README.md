@@ -48,6 +48,7 @@ The method body is never run as it is replaced by the decorator. Parameters are 
 | Marker class | Request Target | Info |
 |----------------------|---------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `Path` (or implicit) | Path | Matched by parameter name unless annotated explicitly (`Path["name"]`). Must be a non-nullable `str`, `int`, or `float`. |
+| `RawPath` | Path | Like `Path`, but spliced into the URL without percent-encoding, bypassing any query-parameter checks (duplicate keys, structure, etc.) that normally apply. Must be a non-nullable `str`. Use only for values that are already encoded relative paths or query fragments. |
 | `Query` | Query | Must be a nullable `str`, `int`, `float`, or `bool`, or a `Sequence` of those, sent as `key=a&key=b&...`. |
 | `Field` | Form Field | `application/x-www-form-urlencoded`. Accepts same types as `Query`. |
 | `Part` | Multipart File Part | Forces the whole request to be multipart and any `Field` params on the same call will become multipart fields as well. Accepts the same types `httpx` takes for `files=`. |
