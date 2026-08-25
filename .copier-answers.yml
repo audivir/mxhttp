@@ -1,5 +1,5 @@
 # Changes here will be overwritten by Copier
-_commit: 0b9cfe5
+_commit: 1a45ad8
 _src_path: gh:audivir/copier-template
 author_email: pypi@audivir.de
 author_name: Tim Hörmann
@@ -8,3 +8,4 @@ github_org: audivir
 project_name: mxhttp
 project_slug: mxhttp
 project_type: python
+publishable: true
