@@ -208,6 +208,31 @@ class Files(SyncConsumer):
 - If the server sent an `ETag` or `Last-Modified` on the first response, it is sent back as `If-Range` on reconnects.
 - If a reconnect gets a full (`200`) response instead of a partial (`206`) one, meaning the server ignored `Range` or the underlying resource changed, `ResumeLostError` is raised rather than silently restarting or splicing mismatched bytes.
 
+#### Resumable downloads to disk
+
+Annotate the return type as `Downloader` (sync) or `AsyncDownloader` (async) instead of `Iterator[bytes]` to get a callable that downloads straight to a file, resuming an interrupted download by calling it again with the same path, even across separate process runs:
+
+```python
+from mxhttp import Downloader
+
+
+class Files(SyncConsumer):
+    @get("/files/{file_id}")
+    def download(self, file_id: int) -> Downloader: ...  # type: ignore[empty-body]
+
+
+downloader = shop_files.download(file_id=7)
+path = downloader("/tmp/report.pdf")  # runs the download, returns the path once it completes
+
+# if the process is killed partway through, calling it again resumes from disk:
+path = shop_files.download(file_id=7)("/tmp/report.pdf")
+```
+
+- The endpoint is called once to bind it (no network activity yet); the returned `Downloader`/`AsyncDownloader` is then called with a destination path to actually run (or resume) the download.
+- Reconnects the same way `resumable=` streaming does, defaulting to `Retry()` if no `resumable=` override is given, since resumability is the point of this return type.
+- Downloads to `{path}.part` plus a `{path}.part.json` sidecar recording the source URL and `ETag`/`Last-Modified`, flushing and `fsync`-ing after every chunk. Only on a clean finish is `{path}.part` atomically renamed to `path` and the sidecar removed, so `path` itself is never observed half-written.
+- Calling the `Downloader` again for the same `path` resumes from `{path}.part` if its sidecar identity matches the current request; a mismatch raises `DownloadIdentityError` rather than silently appending to or discarding the wrong data. Pass `overwrite=True` to discard whatever is there and start over.
+
 ```python
 from mxhttp import streaming_response_handler
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from mxhttp.consumer import AsyncConsumer, SyncConsumer
+from mxhttp.download import AsyncDownloader, Downloader, DownloadIdentityError, DownloadState
 from mxhttp.endpoint import delete, endpoint, get, head, patch, post, put
 from mxhttp.markers import Body, Cookie, Field, Header, Part, Path, Query, RawPath
 from mxhttp.ratelimit import RateLimit, RateLimitExceededError, ratelimit
@@ -11,12 +12,16 @@ from mxhttp.retry import Retry, retry
 from mxhttp.sse import Event
 from mxhttp.types import PartValue
 
-__version__ = "1.5.4"
+__version__ = "1.5.6"
 
 __all__ = [
     "AsyncConsumer",
+    "AsyncDownloader",
     "Body",
     "Cookie",
+    "DownloadIdentityError",
+    "DownloadState",
+    "Downloader",
     "Event",
     "Field",
     "Header",
