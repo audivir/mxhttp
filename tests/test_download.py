@@ -27,7 +27,7 @@ from mxhttp import (
     SyncConsumer,
     get,
 )
-from mxhttp.download import part_paths
+from mxhttp.download import extract_total_size, part_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -391,3 +391,75 @@ async def test_download_rate_limit_applies_at_call_time(
         assert sync_dl1(target1) == target1
         with pytest.raises(RateLimitExceededError):
             sync_dl2(target2)
+
+
+def test_extract_total_size() -> None:
+    resp_range = httpx.Response(206, headers={"Content-Range": "bytes 0-9/100"})
+    assert extract_total_size(resp_range, 0) == 100
+
+    resp_range_wildcard = httpx.Response(206, headers={"Content-Range": "bytes 0-9/*"})
+    assert extract_total_size(resp_range_wildcard, 0) is None
+
+    resp_length = httpx.Response(200, headers={"Content-Length": "80"})
+    assert extract_total_size(resp_length, 20) == 100
+
+    resp_invalid_length = httpx.Response(200, headers={"Content-Length": "invalid"})
+    assert extract_total_size(resp_invalid_length, 0) is None
+
+    resp_empty = httpx.Response(200)
+    assert extract_total_size(resp_empty, 0) is None
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_download_reports_progress(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    events: list[tuple[int, int | None]] = []
+
+    def handler(unused_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"Content-Length": "11"}, content=b"hello world")
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "file.bin"
+    if isinstance(consumer, AsyncDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        await async_dl(target, on_progress=lambda r, t: events.append((r, t)))
+    else:
+        sync_dl = consumer.download(file_id=1)
+        sync_dl(target, on_progress=lambda r, t: events.append((r, t)))
+
+    assert events == [(0, 11), (11, 11)]
+    assert target.read_bytes() == b"hello world"
+
+
+def test_download_reports_progress_on_resume(tmp_path: Path) -> None:
+    events: list[tuple[int, int | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "range" not in request.headers:
+            return httpx.Response(
+                200,
+                headers={"ETag": '"v1"', "Content-Length": "11"},
+                stream=FailingSyncStream([b"hello "], httpx.ReadError("boom")),
+            )
+        return httpx.Response(
+            206, headers={"Content-Range": "bytes 6-10/11"}, content=b"world"
+        )
+
+    consumer = make_consumer(DownloadApi, handler)
+    target = tmp_path / "file.bin"
+
+    with pytest.raises(httpx.ReadError):
+        consumer.download_one_shot(file_id=1)(
+            target, on_progress=lambda r, t: events.append((r, t))
+        )
+
+    assert events == [(0, 11), (6, 11)]
+
+    events.clear()
+    consumer.download_one_shot(file_id=1)(
+        target, on_progress=lambda r, t: events.append((r, t))
+    )
+
+    assert events == [(6, 11), (11, 11)]
+    assert target.read_bytes() == b"hello world"

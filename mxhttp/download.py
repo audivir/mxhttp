@@ -6,7 +6,7 @@ import os
 import time
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
 
 import msgspec
 
@@ -15,6 +15,8 @@ from mxhttp.response import ResumeLostError, apply_streaming_response_handler, r
 from mxhttp.retry import exception_types, resolve_delay
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import anyio
     import httpx
     from _typeshed import StrPath
@@ -23,6 +25,16 @@ if TYPE_CHECKING:
     from mxhttp.ratelimit import RateLimit
     from mxhttp.request import RequestSpec
     from mxhttp.retry import Retry
+
+ProgressCallback: TypeAlias = "Callable[[int, int | None], None]"
+
+
+def _notify(
+    callback: ProgressCallback | None, received: int, total: int | None
+) -> None:
+    """Invokes the synchronous progress callback if provided."""
+    if callback is not None:
+        callback(received, total)
 
 
 class DownloadIdentityError(Exception):
@@ -40,6 +52,19 @@ class DownloadState(msgspec.Struct):
 def part_paths(path: Path) -> tuple[Path, Path]:
     """Returns the staging file and sidecar metadata paths for a download at `path`."""
     return path.with_name(path.name + ".part"), path.with_name(path.name + ".part.json")
+
+
+def extract_total_size(response: httpx.Response, received: int) -> int | None:
+    """Calculates the total expected download size from response headers."""
+    content_range = response.headers.get("content-range")
+    if content_range:
+        _, _, total_str = content_range.partition("/")
+        if total_str.isdigit():
+            return int(total_str)
+    content_length = response.headers.get("content-length")
+    if content_length and content_length.isdigit():
+        return received + int(content_length)
+    return None
 
 
 def load_resume_state(
@@ -109,7 +134,13 @@ class Downloader(msgspec.Struct, frozen=True):
     retry: Retry
     ratelimit: RateLimit | None = None
 
-    def __call__(self, path: StrPath, *, overwrite: bool = False) -> Path:
+    def __call__(
+        self,
+        path: StrPath,
+        *,
+        overwrite: bool = False,
+        on_progress: ProgressCallback | None = None,
+    ) -> Path:
         """Downloads (or resumes) to `path`, returning it once the download completes cleanly.
 
         Raises:
@@ -138,11 +169,14 @@ class Downloader(msgspec.Struct, frozen=True):
                             raise ResumeLostError("server ignored Range or the resource changed")
                         if validator is None:
                             validator = write_state(state_path, self.spec.url, response)
+                        total = extract_total_size(response, received)
+                        _notify(on_progress, received, total)
                         for chunk in response.iter_bytes():
                             fh.write(chunk)
                             fh.flush()
                             os.fsync(fh.fileno())
                             received += len(chunk)
+                            _notify(on_progress, received, total)
                     break
                 except exception_types(self.retry.on):
                     attempt += 1
@@ -163,7 +197,13 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
     retry: Retry
     ratelimit: RateLimit | None = None
 
-    async def __call__(self, path: StrPath, *, overwrite: bool = False) -> Path:
+    async def __call__(
+        self,
+        path: StrPath,
+        *,
+        overwrite: bool = False,
+        on_progress: ProgressCallback | None = None,
+    ) -> Path:
         """Downloads (or resumes) to `path`, returning it once the download completes cleanly.
 
         Raises:
@@ -199,9 +239,12 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                             validator = await write_state_async(
                                 state_path, self.spec.url, response
                             )
+                        total = extract_total_size(response, received)
+                        _notify(on_progress, received, total)
                         async for chunk in response.aiter_bytes():
                             await fh.write(chunk)
                             received += len(chunk)
+                            _notify(on_progress, received, total)
                     await fh.flush()
                     break
                 except exception_types(self.retry.on):
