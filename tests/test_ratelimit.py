@@ -92,6 +92,17 @@ class MixedLimitApi(SyncConsumer):
     def get_item_unlimited(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
 
 
+class KeyedLimitApi(SyncConsumer):
+    @get("/items/a", ratelimit=RateLimit(calls=1, period=60, block=False, key="pool_a"))
+    def get_a(self) -> Item: ...  # type: ignore[empty-body]
+
+    @get("/items/b", ratelimit=RateLimit(calls=1, period=60, block=False, key="pool_b"))
+    def get_b(self) -> Item: ...  # type: ignore[empty-body]
+
+    @get("/items/a2", ratelimit=RateLimit(calls=1, period=60, block=False, key="pool_a"))
+    def get_a2(self) -> Item: ...  # type: ignore[empty-body]
+
+
 def test_ratelimit_rejects_non_positive_calls() -> None:
     with pytest.raises(ValueError, match="calls must be >= 1"):
         RateLimit(calls=0, period=60)
@@ -306,3 +317,38 @@ async def test_ratelimit_applies_to_async_streaming_endpoint(
     assert b"".join([chunk async for chunk in first]) == b"chunk"
     with pytest.raises(RateLimitExceededError):
         await consumer.stream_item(item_id=2)
+
+
+def test_ratelimit_window_isolated_by_calls_and_period(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    monkeypatch.setattr(time, "monotonic", clock)
+
+    base = "https://ratelimit-isolated.example.com"
+    tight = make_consumer(TightLimitApi, ITEM, base_url=base)
+    loose = make_consumer(LooseLimitApi, ITEM, base_url=base)
+
+    assert tight.get_item_no_block(item_id=1) == ITEM
+    with pytest.raises(RateLimitExceededError):
+        tight.get_item_no_block(item_id=2)
+
+    assert loose.get_item(item_id=1) == ITEM
+    assert loose.get_item(item_id=2) == ITEM
+
+
+def test_ratelimit_window_isolated_by_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = FakeClock()
+    monkeypatch.setattr(time, "monotonic", clock)
+
+    consumer = make_consumer(
+        KeyedLimitApi, ITEM, base_url="https://ratelimit-keyed.example.com"
+    )
+
+    assert consumer.get_a() == ITEM
+    with pytest.raises(RateLimitExceededError):
+        consumer.get_a2()
+
+    assert consumer.get_b() == ITEM
+    with pytest.raises(RateLimitExceededError):
+        consumer.get_b()

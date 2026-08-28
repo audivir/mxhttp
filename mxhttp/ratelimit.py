@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
 from urllib.parse import urlsplit
 
 import msgspec
@@ -28,6 +28,7 @@ class RateLimit(msgspec.Struct, frozen=True):
     block: bool = True
     max_delay: float | None = None
     """Raises `RateLimitExceededError` instead of sleeping past this many seconds."""
+    key: str | None = None
 
     def __post_init__(self) -> None:
         if self.calls < 1:
@@ -48,13 +49,15 @@ class Window:
         self.lock = threading.Lock()
 
 
-windows: dict[tuple[str, int], Window] = {}
+WindowKey: TypeAlias = tuple[str, int, str | None, int, float]
+
+windows: dict[WindowKey, Window] = {}
 windows_guard = threading.Lock()
 
 
-def get_window(host: str, port: int) -> Window:
-    """Returns the shared rate-limit window for `(host, port)`, creating it on first use."""
-    key = (host, port)
+def get_window(host: str, port: int, config: RateLimit) -> Window:
+    """Returns the shared rate-limit window for `(host, port, key, calls, period)`."""
+    key: WindowKey = (host, port, config.key, config.calls, config.period)
     with windows_guard:
         window = windows.get(key)
         if window is None:
@@ -95,7 +98,8 @@ def ratelimit(config: RateLimit) -> Callable[[type[AnyC_T]], type[AnyC_T]]:
 
 def acquire_sync(config: RateLimit, base_url: str) -> None:
     """Blocks, or raises `RateLimitExceededError`, until a call slot for the host is free."""
-    delay = wait_time(get_window(*host_port(base_url)), config)
+    host, port = host_port(base_url)
+    delay = wait_time(get_window(host, port, config), config)
     if delay <= 0:
         return
     if not config.block:
@@ -109,7 +113,8 @@ async def acquire_async(config: RateLimit, base_url: str) -> None:
     """Blocks, or raises `RateLimitExceededError`, until a call slot for the host is free."""
     import asyncio
 
-    delay = wait_time(get_window(*host_port(base_url)), config)
+    host, port = host_port(base_url)
+    delay = wait_time(get_window(host, port, config), config)
     if delay <= 0:
         return
     if not config.block:
