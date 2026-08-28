@@ -10,7 +10,7 @@ from mxhttp.retry import Retry, retry
 from mxhttp.sse import Event
 from mxhttp.types import PartValue
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 __all__ = [
     "AsyncConsumer",

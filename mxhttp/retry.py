@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import email.utils
 import random
 import time
+from datetime import datetime, timezone
 from http import HTTPStatus
 from typing import TYPE_CHECKING, TypeAlias
 
@@ -66,6 +68,8 @@ class Retry(msgspec.Struct, frozen=True):
     exponent: float = 2.0
     jitter: bool = True
     max_delay: float = 30.0
+    respect_retry_after: bool = True
+    """Uses the response `Retry-After` header, when present, as a floor for the computed backoff."""
     timeout: float | httpx.Timeout | None = None
 
     def __post_init__(self) -> None:
@@ -78,6 +82,33 @@ class Retry(msgspec.Struct, frozen=True):
         if self.jitter:
             raw *= 1 + random.random()  # noqa: S311
         return min(raw, self.max_delay)
+
+
+def parse_retry_after(value: str) -> float | None:
+    """Parses a `Retry-After` header value as a delay in seconds, from seconds or an HTTP-date."""
+    if value.isdigit():
+        return float(value)
+    try:
+        target = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if target.tzinfo is None:
+        target = target.replace(tzinfo=timezone.utc)
+    return (target - datetime.now(timezone.utc)).total_seconds()
+
+
+def resolve_delay(config: Retry, attempt: int, response: httpx.Response | None) -> float:
+    """Computes the sleep duration before the next attempt, honoring `Retry-After` when present."""
+    computed = config.delay(attempt)
+    if not config.respect_retry_after or response is None:
+        return computed
+    header = response.headers.get("Retry-After")
+    if header is None:
+        return computed
+    header_delay = parse_retry_after(header)
+    if header_delay is None or header_delay < 0:
+        return computed
+    return min(max(computed, header_delay), config.max_delay)
 
 
 def retry(config: Retry) -> Callable[[type[AnyC_T]], type[AnyC_T]]:
@@ -119,12 +150,12 @@ def request_sync(self: SyncConsumer, spec: RequestSpec, config: Retry | None) ->
             attempt += 1
             if attempt >= config.attempts:
                 raise
-            time.sleep(config.delay(attempt))
+            time.sleep(resolve_delay(config, attempt, None))
             continue
         attempt += 1
         if not matches_response(config.on, response) or attempt >= config.attempts:
             return response
-        time.sleep(config.delay(attempt))
+        time.sleep(resolve_delay(config, attempt, response))
 
 
 async def request_async(
@@ -144,9 +175,9 @@ async def request_async(
             attempt += 1
             if attempt >= config.attempts:
                 raise
-            await asyncio.sleep(config.delay(attempt))
+            await asyncio.sleep(resolve_delay(config, attempt, None))
             continue
         attempt += 1
         if not matches_response(config.on, response) or attempt >= config.attempts:
             return response
-        await asyncio.sleep(config.delay(attempt))
+        await asyncio.sleep(resolve_delay(config, attempt, response))

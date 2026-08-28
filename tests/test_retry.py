@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+import time
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
@@ -10,6 +14,9 @@ from conftest import make_consumer, make_stateful_consumer
 from models import ITEM, ITEM_BUILTINS, Item
 
 from mxhttp import AsyncConsumer, Retry, SyncConsumer, get, retry
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 pytestmark = pytest.mark.anyio
 
@@ -285,3 +292,138 @@ async def test_retry_timeout_applied_to_every_attempt(
 
     assert calls == 2
     assert all(t == {"connect": 7, "read": 7, "write": 7, "pool": 7} for t in seen_timeouts)
+
+
+class RetryAfterApi(SyncConsumer):
+    @get("/items/{item_id}", retry=Retry(attempts=3, backoff=1.0, jitter=False))
+    def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
+
+    @get("/items/{item_id}", retry=Retry(attempts=3, backoff=20.0, jitter=False))
+    def get_item_large_backoff(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
+
+    @get("/items/{item_id}", retry=Retry(attempts=3, backoff=1.0, jitter=False, max_delay=5.0))
+    def get_item_capped(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
+
+    @get(
+        "/items/{item_id}",
+        retry=Retry(attempts=3, backoff=1.0, jitter=False, respect_retry_after=False),
+    )
+    def get_item_ignore_retry_after(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
+
+
+class AsyncRetryAfterApi(AsyncConsumer):
+    @get("/items/{item_id}", retry=Retry(attempts=3, backoff=1.0, jitter=False))
+    async def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
+
+
+def retry_after_handler(header: str | None) -> Callable[[httpx.Request], httpx.Response]:
+    """Builds a handler that returns a 503 (with an optional `Retry-After` header) then a 200."""
+    calls = 0
+
+    def handler(unused_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            headers = {"Retry-After": header} if header is not None else {}
+            return httpx.Response(503, headers=headers, json=ITEM_BUILTINS)
+        return httpx.Response(200, json=ITEM_BUILTINS)
+
+    return handler
+
+
+def test_retry_after_seconds_overrides_computed_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr(time, "sleep", delays.append)
+
+    consumer = make_consumer(RetryAfterApi, retry_after_handler("10"))
+    assert consumer.get_item(item_id=1) == ITEM
+    assert delays == [10.0]
+
+
+def test_retry_after_smaller_than_computed_backoff_keeps_computed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr(time, "sleep", delays.append)
+
+    consumer = make_consumer(RetryAfterApi, retry_after_handler("1"))
+    assert consumer.get_item_large_backoff(item_id=1) == ITEM
+    assert delays == [20.0]  # computed backoff (20s) exceeds the 1s Retry-After, so it wins
+
+
+def test_retry_after_capped_by_max_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr(time, "sleep", delays.append)
+
+    consumer = make_consumer(RetryAfterApi, retry_after_handler("1000"))
+    assert consumer.get_item_capped(item_id=1) == ITEM
+    assert delays == [5.0]  # capped by max_delay even though the header asked for longer
+
+
+def test_retry_after_http_date_is_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr(time, "sleep", delays.append)
+    target = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=10))
+
+    consumer = make_consumer(RetryAfterApi, retry_after_handler(target))
+    assert consumer.get_item(item_id=1) == ITEM
+    assert len(delays) == 1
+    assert 8.0 <= delays[0] <= 10.5
+
+
+def test_retry_after_http_date_without_timezone_assumes_utc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr(time, "sleep", delays.append)
+    # a date with no "GMT"/offset suffix parses to a naive datetime, assumed UTC rather than local.
+    target = (datetime.now(timezone.utc) + timedelta(seconds=10)).strftime("%a, %d %b %Y %H:%M:%S")
+
+    consumer = make_consumer(RetryAfterApi, retry_after_handler(target))
+    assert consumer.get_item(item_id=1) == ITEM
+    assert len(delays) == 1
+    assert 8.0 <= delays[0] <= 10.5
+
+
+def test_retry_after_disabled_by_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr(time, "sleep", delays.append)
+
+    consumer = make_consumer(RetryAfterApi, retry_after_handler("99"))
+    assert consumer.get_item_ignore_retry_after(item_id=1) == ITEM
+    assert delays == [1.0]  # respect_retry_after=False ignores the header entirely
+
+
+def test_retry_after_missing_header_uses_computed(monkeypatch: pytest.MonkeyPatch) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr(time, "sleep", delays.append)
+
+    consumer = make_consumer(RetryAfterApi, retry_after_handler(None))
+    assert consumer.get_item(item_id=1) == ITEM
+    assert delays == [1.0]
+
+
+def test_retry_after_malformed_header_falls_back_to_computed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr(time, "sleep", delays.append)
+
+    consumer = make_consumer(RetryAfterApi, retry_after_handler("not-a-valid-value"))
+    assert consumer.get_item(item_id=1) == ITEM
+    assert delays == [1.0]
+
+
+async def test_retry_after_overrides_computed_backoff_async(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    consumer = make_consumer(AsyncRetryAfterApi, retry_after_handler("10"))
+    assert await consumer.get_item(item_id=1) == ITEM
+    assert delays == [10.0]

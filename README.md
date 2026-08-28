@@ -131,6 +131,7 @@ class Shop(SyncConsumer):
 - The last attempt's response (still checked by the response handler) or exception is what's ultimately raised/returned.
 - Only applies to regular (non-streaming, non-SSE) endpoints.
 - `on` accepts a mix of status codes, exception types, and `Callable[[httpx.Response], bool]` predicates. Any single entry matching the outcome of an attempt triggers a retry; combine conditions with `and` inside one predicate if you need all of them to hold at once.
+- When a matched response carries a `Retry-After` header (seconds or an HTTP-date), its delay is used instead of the computed backoff if it is larger, still capped by `max_delay`. Set `respect_retry_after=False` on `Retry` to always use the computed backoff.
 - Pass `retry=` directly to `@get`/`@post`/etc. to override the class's `Retry` config for that one endpoint, or `retry=None` to disable retries for it:
 
 ```python
