@@ -119,14 +119,21 @@ def test_download_rejects_async_method_returning_downloader() -> None:
             async def download(self, file_id: int) -> Downloader: ...  # type: ignore[empty-body]
 
 
-def test_download_completes_and_returns_path(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_download_completes_and_returns_path(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
     def handler(unused_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"hello world")
 
-    consumer = make_consumer(DownloadApi, handler)
+    consumer = make_consumer(cls, handler)
     target = tmp_path / "file.bin"
-    downloader = consumer.download(file_id=1)
-    result = downloader(target)
+    if isinstance(consumer, AsyncDownloadApi):
+        async_downloader = await consumer.download(file_id=1)
+        result = await async_downloader(target)
+    else:
+        sync_downloader = consumer.download(file_id=1)
+        result = sync_downloader(target)
 
     assert result == target
     assert target.read_bytes() == b"hello world"
@@ -171,11 +178,14 @@ def test_download_resumes_across_separate_calls(tmp_path: Path) -> None:
     assert seen[1].headers["if-range"] == '"v1"'
 
 
-def test_download_identity_mismatch_raises(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_download_identity_mismatch_raises(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
     # the identity check is local and pre-flight, so a mismatch must never reach the network.
     handler = MagicMock()
 
-    consumer = make_consumer(DownloadApi, handler)
+    consumer = make_consumer(cls, handler)
     target = tmp_path / "file.bin"
     part_path, state_path = part_paths(target)
     part_path.write_bytes(b"stale partial data")
@@ -183,20 +193,28 @@ def test_download_identity_mismatch_raises(tmp_path: Path) -> None:
         msgspec.json.encode(DownloadState(url="/different/file", etag=None, last_modified=None))
     )
 
-    downloader = consumer.download(file_id=1)
-    with pytest.raises(DownloadIdentityError):
-        downloader(target)
+    if isinstance(consumer, AsyncDownloadApi):
+        async_downloader = await consumer.download(file_id=1)
+        with pytest.raises(DownloadIdentityError):
+            await async_downloader(target)
+    else:
+        downloader = consumer.download(file_id=1)
+        with pytest.raises(DownloadIdentityError):
+            downloader(target)
 
     handler.assert_not_called()
     # the mismatched files are left in place rather than silently discarded.
     assert part_path.read_bytes() == b"stale partial data"
 
 
-def test_download_overwrite_discards_mismatched_part_file(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_download_overwrite_discards_mismatched_part_file(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
     def handler(unused_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"fresh content")
 
-    consumer = make_consumer(DownloadApi, handler)
+    consumer = make_consumer(cls, handler)
     target = tmp_path / "file.bin"
     part_path, state_path = part_paths(target)
     part_path.write_bytes(b"stale partial data")
@@ -204,7 +222,11 @@ def test_download_overwrite_discards_mismatched_part_file(tmp_path: Path) -> Non
         msgspec.json.encode(DownloadState(url="/different/file", etag=None, last_modified=None))
     )
 
-    result = consumer.download(file_id=1)(target, overwrite=True)
+    if isinstance(consumer, AsyncDownloadApi):
+        async_downloader = await consumer.download(file_id=1)
+        result = await async_downloader(target, overwrite=True)
+    else:
+        result = consumer.download(file_id=1)(target, overwrite=True)
 
     assert result == target
     assert target.read_bytes() == b"fresh content"
@@ -281,19 +303,6 @@ async def test_async_download_resumes_across_separate_calls(tmp_path: Path) -> N
     assert not part_path.exists()
     assert not state_path.exists()
     assert len(seen) == 2
-
-
-async def test_async_download_completes_and_returns_path(tmp_path: Path) -> None:
-    def handler(unused_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"hello world")
-
-    consumer = make_consumer(AsyncDownloadApi, handler)
-    target = tmp_path / "file.bin"
-    downloader = await consumer.download(file_id=1)
-    result = await downloader(target)
-
-    assert result == target
-    assert target.read_bytes() == b"hello world"
 
 
 async def test_async_download_reconnects_internally_then_succeeds(

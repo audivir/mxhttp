@@ -29,7 +29,7 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
   "Typing :: Typed",
 ]
-dependencies = ["httpx", "msgspec", "typing-extensions"]
+dependencies = ["anyio", "httpx", "msgspec", "typing-extensions"]
 
 [project.optional-dependencies]
 pydantic = ["pydantic"]
