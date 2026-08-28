@@ -31,6 +31,7 @@ def make_consumer(
     *,
     status_code: int = 200,
     base_url: str = "https://api.example.com",
+    auth: httpx.Auth | tuple[str, str] | None = None,
     track_requests: Literal[False] = False,
 ) -> AnyC_T: ...
 @overload
@@ -40,14 +41,16 @@ def make_consumer(
     *,
     status_code: int = 200,
     base_url: str = "https://api.example.com",
+    auth: httpx.Auth | tuple[str, str] | None = None,
     track_requests: Literal[True] = ...,
 ) -> tuple[AnyC_T, list[httpx.Request]]: ...
-def make_consumer(
+def make_consumer(  # noqa: PLR0913
     cls: type[AnyC_T],
     response: Callable[[httpx.Request], Parsed_T] | Parsed_T,
     *,
     status_code: int = 200,
     base_url: str = "https://api.example.com",
+    auth: httpx.Auth | tuple[str, str] | None = None,
     track_requests: bool = False,
 ) -> AnyC_T | tuple[AnyC_T, list[httpx.Request]]:
     seen: list[httpx.Request] = []
@@ -67,12 +70,14 @@ def make_consumer(
         return http_response
 
     transport = httpx.MockTransport(handler)
-    consumer = cls(base_url)
+    consumer = cls(base_url, auth=auth)
 
     if issubclass(cls, SyncConsumer):
-        consumer._session = httpx.Client(base_url=consumer.base_url, transport=transport)
+        consumer._session = httpx.Client(base_url=consumer.base_url, transport=transport, auth=auth)
     elif issubclass(cls, AsyncConsumer):
-        consumer._session = httpx.AsyncClient(base_url=consumer.base_url, transport=transport)
+        consumer._session = httpx.AsyncClient(
+            base_url=consumer.base_url, transport=transport, auth=auth
+        )
     else:
         raise TypeError(f"Unsupported consumer class: {cls.__name__}")
     if track_requests:

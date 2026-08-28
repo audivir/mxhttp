@@ -30,15 +30,16 @@ class BaseConsumer:
         *,
         use_async: bool = False,
         timeout: float | httpx.Timeout = 5.0,
+        auth: httpx.Auth | tuple[str, str] | None = None,
     ) -> None:
         """Initializes the client bound to `base_url`."""
         import httpx
 
         self.base_url = base_url.rstrip("/")
         self._session = (
-            httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
+            httpx.AsyncClient(base_url=self.base_url, timeout=timeout, auth=auth)
             if use_async
-            else httpx.Client(base_url=self.base_url, timeout=timeout)
+            else httpx.Client(base_url=self.base_url, timeout=timeout, auth=auth)
         )
 
     @override
@@ -54,9 +55,15 @@ class BaseConsumer:
 class SyncConsumer(BaseConsumer):
     """Base class for the synchronous declarative API client."""
 
-    def __init__(self, base_url: str, *, timeout: float | httpx.Timeout = 5.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        timeout: float | httpx.Timeout = 5.0,
+        auth: httpx.Auth | tuple[str, str] | None = None,
+    ) -> None:
         """Initializes the client bound to `base_url`."""
-        super().__init__(base_url, use_async=False, timeout=timeout)
+        super().__init__(base_url, use_async=False, timeout=timeout, auth=auth)
 
     def __enter__(self) -> Self:
         return self
@@ -81,9 +88,15 @@ class SyncConsumer(BaseConsumer):
 class AsyncConsumer(BaseConsumer):
     """Base class for the asynchronous declarative API client."""
 
-    def __init__(self, base_url: str, *, timeout: float | httpx.Timeout = 5.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        timeout: float | httpx.Timeout = 5.0,
+        auth: httpx.Auth | tuple[str, str] | None = None,
+    ) -> None:
         """Initializes the client bound to `base_url`."""
-        super().__init__(base_url, use_async=True, timeout=timeout)
+        super().__init__(base_url, use_async=True, timeout=timeout, auth=auth)
 
     async def __aenter__(self) -> Self:
         return self

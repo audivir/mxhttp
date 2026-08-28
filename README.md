@@ -233,9 +233,17 @@ for event in chat.events():
 
 SSE streams use `@streaming_response_handler` matching byte streaming above.
 
+## Authentication
+
+Pass `auth=` to the consumer constructor, accepting anything `httpx.Client`/`httpx.AsyncClient` do: an `httpx.Auth` instance (`httpx.BasicAuth`, `httpx.DigestAuth`, or a custom multi-step flow), or a `(username, password)` tuple as Basic auth shorthand.
+
+```python
+shop = Shop("https://api.example.com", auth=httpx.BasicAuth("alice", "secret"))
+```
+
 ## Further configuration
 
-The underlying `httpx.Client` or `httpx.AsyncClient` is stored at `.session` to set default headers, auth, or timeouts.
+The underlying `httpx.Client` or `httpx.AsyncClient` is stored at `.session` to set default headers or other client options after construction.
 
 ## Typing
 
