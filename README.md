@@ -122,7 +122,7 @@ Configure automatic retries with exponential backoff via `@retry` on the class, 
 from mxhttp import Retry, SyncConsumer, get, retry
 
 
-@retry(Retry(attempts=3, statuses={429, 500, 502, 503, 504}))
+@retry(Retry(attempts=3, on={429, 500, 502, 503, 504}))
 class Shop(SyncConsumer):
     @get("/items/{item_id}")
     def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
@@ -130,6 +130,7 @@ class Shop(SyncConsumer):
 
 - The last attempt's response (still checked by the response handler) or exception is what's ultimately raised/returned.
 - Only applies to regular (non-streaming, non-SSE) endpoints.
+- `on` accepts a mix of status codes, exception types, and `Callable[[httpx.Response], bool]` predicates. Any single entry matching the outcome of an attempt triggers a retry; combine conditions with `and` inside one predicate if you need all of them to hold at once.
 - Pass `retry=` directly to `@get`/`@post`/etc. to override the class's `Retry` config for that one endpoint, or `retry=None` to disable retries for it:
 
 ```python

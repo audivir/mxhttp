@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 import time
 from http import HTTPStatus
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
 
 import msgspec
 
@@ -18,7 +18,9 @@ if TYPE_CHECKING:
     from mxhttp.request import RequestSpec
     from mxhttp.types import AnyC_T
 
-DEFAULT_STATUSES = frozenset(
+RetryOn: TypeAlias = "int | type[BaseException] | Callable[[httpx.Response], bool]"
+
+DEFAULT_ON_STATUSES = frozenset(
     {
         HTTPStatus.TOO_MANY_REQUESTS,
         HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -29,21 +31,37 @@ DEFAULT_STATUSES = frozenset(
 )
 
 
-def build_default_exceptions() -> tuple[type[Exception], ...]:
-    """Builds the default exceptions to catch."""
+def build_default_on() -> tuple[RetryOn, ...]:
+    """Builds the default retry conditions: transient-failure statuses and transport errors."""
     import httpx
 
-    return (httpx.TransportError,)
+    return (*DEFAULT_ON_STATUSES, httpx.TransportError)
+
+
+def exception_types(on: Collection[RetryOn]) -> tuple[type[BaseException], ...]:
+    """Extracts the exception-type entries from `on`, usable as an `except` clause tuple."""
+    return tuple(entry for entry in on if isinstance(entry, type))
+
+
+def matches_response(on: Collection[RetryOn], response: httpx.Response) -> bool:
+    """Checks whether `response` satisfies a status-code or predicate entry in `on`."""
+    for entry in on:
+        if isinstance(entry, type):
+            continue
+        if isinstance(entry, int):
+            if response.status_code == entry:
+                return True
+        elif entry(response):
+            return True
+    return False
 
 
 class Retry(msgspec.Struct, frozen=True):
     """Configures automatic retries with exponential backoff for a consumer class."""
 
     attempts: int = 3
-    statuses: Collection[int] = DEFAULT_STATUSES
-    exceptions: Collection[type[Exception]] = msgspec.field(
-        default_factory=build_default_exceptions
-    )
+    on: Collection[RetryOn] = msgspec.field(default_factory=build_default_on)
+    """Status codes, exception types, or response predicates that trigger a retry."""
     backoff: float = 1.0
     exponent: float = 2.0
     jitter: bool = True
@@ -97,14 +115,14 @@ def request_sync(self: SyncConsumer, spec: RequestSpec, config: Retry | None) ->
     while True:
         try:
             response = send_sync(self, spec, config)
-        except tuple(config.exceptions):
+        except exception_types(config.on):
             attempt += 1
             if attempt >= config.attempts:
                 raise
             time.sleep(config.delay(attempt))
             continue
         attempt += 1
-        if response.status_code not in config.statuses or attempt >= config.attempts:
+        if not matches_response(config.on, response) or attempt >= config.attempts:
             return response
         time.sleep(config.delay(attempt))
 
@@ -122,13 +140,13 @@ async def request_async(
     while True:
         try:
             response = await send_async(self, spec, config)
-        except tuple(config.exceptions):
+        except exception_types(config.on):
             attempt += 1
             if attempt >= config.attempts:
                 raise
             await asyncio.sleep(config.delay(attempt))
             continue
         attempt += 1
-        if response.status_code not in config.statuses or attempt >= config.attempts:
+        if not matches_response(config.on, response) or attempt >= config.attempts:
             return response
         await asyncio.sleep(config.delay(attempt))

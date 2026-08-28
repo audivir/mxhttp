@@ -54,6 +54,23 @@ class MixedRetryApi(SyncConsumer):
     def get_item_no_retry(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
 
 
+class RetryOnApi(SyncConsumer):
+    @get("/items/{item_id}", retry=Retry(attempts=2, backoff=0, on={418}))
+    def get_item_custom_status(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
+
+    @get("/items/{item_id}", retry=Retry(attempts=2, backoff=0, on={ValueError}))
+    def get_item_custom_exception(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
+
+    @get(
+        "/items/{item_id}",
+        retry=Retry(attempts=2, backoff=0, on={lambda r: r.headers.get("x-retry-me") == "yes"}),
+    )
+    def get_item_predicate(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
+
+    @get("/items/{item_id}", retry=Retry(attempts=3, backoff=0, on={500, ValueError}))
+    def get_item_mixed(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
+
+
 class RetryTimeoutApi(SyncConsumer):
     @get("/items/{item_id}", retry=Retry(attempts=3, backoff=0, timeout=7))
     def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
@@ -167,6 +184,56 @@ def test_endpoint_retry_override_can_disable_retry() -> None:
     with pytest.raises(httpx.HTTPStatusError):
         consumer.get_item_no_retry(item_id=1)
     assert calls() == 1  # explicit retry=None disables the class's default
+
+
+def test_retry_on_status_replaces_default_statuses() -> None:
+    consumer, calls = make_stateful_consumer(RetryOnApi, [500])
+
+    with pytest.raises(httpx.HTTPStatusError):
+        consumer.get_item_custom_status(item_id=1)
+    assert calls() == 1  # 500 isn't in the custom `on`, so a default-retryable status is ignored
+
+
+def test_retry_on_custom_status_code() -> None:
+    consumer, calls = make_stateful_consumer(RetryOnApi, [418, 200])
+
+    assert consumer.get_item_custom_status(item_id=1) == ITEM
+    assert calls() == 2
+
+
+def test_retry_on_custom_exception_type() -> None:
+    consumer, calls = make_stateful_consumer(RetryOnApi, [ValueError("boom"), 200])
+
+    assert consumer.get_item_custom_exception(item_id=1) == ITEM
+    assert calls() == 2
+
+
+def test_retry_on_exception_not_in_on_reraises_immediately() -> None:
+    consumer, calls = make_stateful_consumer(RetryOnApi, [httpx.ConnectError("boom")])
+
+    with pytest.raises(httpx.ConnectError):
+        consumer.get_item_custom_exception(item_id=1)
+    assert calls() == 1  # ConnectError isn't in the custom `on`, so it isn't caught at all
+
+
+def test_retry_on_predicate_over_response() -> None:
+    consumer, calls = make_stateful_consumer(
+        RetryOnApi,
+        [
+            httpx.Response(200, headers={"x-retry-me": "yes"}, json=ITEM_BUILTINS),
+            httpx.Response(200, json=ITEM_BUILTINS),
+        ],
+    )
+
+    assert consumer.get_item_predicate(item_id=1) == ITEM
+    assert calls() == 2  # a 200 still retries because the predicate, not the status, decides
+
+
+def test_retry_on_mixed_entries_matches_either() -> None:
+    consumer, calls = make_stateful_consumer(RetryOnApi, [ValueError("boom"), 500, 200])
+
+    assert consumer.get_item_mixed(item_id=1) == ITEM
+    assert calls() == 3
 
 
 def test_retry_rejects_zero_attempts() -> None:
