@@ -204,9 +204,10 @@ def endpoint(  # noqa: C901, PLR0915
                 async def async_downloader_wrapper(
                     self: AsyncConsumer, *args: P.args, **kwargs: P.kwargs
                 ) -> AsyncDownloader:
-                    await gate_async(self, resolve_ratelimit(self))
                     spec = resolve_spec(self, *args, **kwargs)
-                    return AsyncDownloader(self, spec, resumable or Retry())
+                    return AsyncDownloader(
+                        self, spec, resumable or Retry(), resolve_ratelimit(self)
+                    )
 
                 return async_downloader_wrapper  # type: ignore[return-value]
 
@@ -253,9 +254,8 @@ def endpoint(  # noqa: C901, PLR0915
             def downloader_wrapper(
                 self: SyncConsumer, *args: P.args, **kwargs: P.kwargs
             ) -> Downloader:
-                gate_sync(self, resolve_ratelimit(self))
                 spec = resolve_spec(self, *args, **kwargs)
-                return Downloader(self, spec, resumable or Retry())
+                return Downloader(self, spec, resumable or Retry(), resolve_ratelimit(self))
 
             return downloader_wrapper  # type: ignore[return-value]
 

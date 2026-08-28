@@ -20,6 +20,8 @@ from mxhttp import (
     Downloader,
     DownloadIdentityError,
     DownloadState,
+    RateLimit,
+    RateLimitExceededError,
     ResumeLostError,
     Retry,
     SyncConsumer,
@@ -81,6 +83,16 @@ class AsyncDownloadApi(AsyncConsumer):
     async def download_one_shot(self, file_id: int) -> AsyncDownloader: ...  # type: ignore[empty-body]
 
 
+class RateLimitedDownloadApi(SyncConsumer):
+    @get("/files/{file_id}", ratelimit=RateLimit(calls=1, period=60, block=False))
+    def download(self, file_id: int) -> Downloader: ...  # type: ignore[empty-body]
+
+
+class AsyncRateLimitedDownloadApi(AsyncConsumer):
+    @get("/files/{file_id}", ratelimit=RateLimit(calls=1, period=60, block=False))
+    async def download(self, file_id: int) -> AsyncDownloader: ...  # type: ignore[empty-body]
+
+
 def test_download_rejects_non_get_methods() -> None:
     from mxhttp import endpoint
 
@@ -95,7 +107,7 @@ def test_download_rejects_sync_method_returning_async_downloader() -> None:
     with pytest.raises(TypeError, match="must return Downloader"):
 
         class _Api(SyncConsumer):
-            @get("/files/{file_id}")  # type: ignore[type-var]
+            @get("/files/{file_id}")
             def download(self, file_id: int) -> AsyncDownloader: ...  # type: ignore[empty-body]
 
 
@@ -103,7 +115,7 @@ def test_download_rejects_async_method_returning_downloader() -> None:
     with pytest.raises(TypeError, match="must return AsyncDownloader"):
 
         class _Api(AsyncConsumer):
-            @get("/files/{file_id}")  # type: ignore[type-var]
+            @get("/files/{file_id}")
             async def download(self, file_id: int) -> Downloader: ...  # type: ignore[empty-body]
 
 
@@ -323,7 +335,50 @@ async def test_async_download_raises_resume_lost_when_server_ignores_range(
 
     consumer = make_consumer(AsyncDownloadApi, handler)
     target = tmp_path / "file.bin"
-    downloader = await consumer.download(file_id=1)  # attempts=3, so this reconnects first
+    downloader = await consumer.download(file_id=1)
 
     with pytest.raises(ResumeLostError):
         await downloader(target)
+
+
+@pytest.mark.parametrize(
+    ("cls", "base_url"),
+    [
+        (RateLimitedDownloadApi, "https://ratelimit-download.example.com"),
+        (AsyncRateLimitedDownloadApi, "https://ratelimit-async-download.example.com"),
+    ],
+    ids=["sync", "async"],
+)
+async def test_download_rate_limit_applies_at_call_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cls: type[RateLimitedDownloadApi | AsyncRateLimitedDownloadApi],
+    base_url: str,
+) -> None:
+    from test_ratelimit import FakeClock
+
+    clock = FakeClock()
+    monkeypatch.setattr(time, "monotonic", clock)
+
+    def handler(unused_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"content")
+
+    consumer = make_consumer(cls, handler, base_url=base_url)
+    target1 = tmp_path / "file1.bin"
+    target2 = tmp_path / "file2.bin"
+
+    if isinstance(consumer, AsyncRateLimitedDownloadApi):
+        # creating downloader instances does not consume the rate limit budget.
+        async_dl1 = await consumer.download(file_id=1)
+        async_dl2 = await consumer.download(file_id=2)
+        assert await async_dl1(target1) == target1
+        with pytest.raises(RateLimitExceededError):
+            await async_dl2(target2)
+    else:
+        # creating downloader instances does not consume the rate limit budget.
+        sync_dl1 = consumer.download(file_id=1)
+        sync_dl2 = consumer.download(file_id=2)
+        assert sync_dl1(target1) == target1
+        with pytest.raises(RateLimitExceededError):
+            sync_dl2(target2)

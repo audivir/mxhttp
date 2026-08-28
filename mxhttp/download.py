@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import msgspec
 
+from mxhttp.ratelimit import gate_async, gate_sync
 from mxhttp.response import ResumeLostError, apply_streaming_response_handler, resume_headers
 from mxhttp.retry import exception_types, resolve_delay
 
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from _typeshed import StrPath
 
     from mxhttp.consumer import AsyncConsumer, SyncConsumer
+    from mxhttp.ratelimit import RateLimit
     from mxhttp.request import RequestSpec
     from mxhttp.retry import Retry
 
@@ -67,14 +69,13 @@ def write_state(state_path: Path, url: str, response: httpx.Response) -> str | N
     return validator
 
 
-class Downloader:
+class Downloader(msgspec.Struct, frozen=True):
     """Bound, not-yet-executed resumable download, returned by a `-> Downloader` GET endpoint."""
 
-    def __init__(self, consumer: SyncConsumer, spec: RequestSpec, retry: Retry) -> None:
-        """Binds the download to `consumer` and the resolved request `spec`."""
-        self.consumer = consumer
-        self.spec = spec
-        self.retry = retry
+    consumer: SyncConsumer
+    spec: RequestSpec
+    retry: Retry
+    ratelimit: RateLimit | None = None
 
     def __call__(self, path: StrPath, *, overwrite: bool = False) -> Path:
         """Downloads (or resumes) to `path`, returning it once the download completes cleanly.
@@ -93,6 +94,7 @@ class Downloader:
         attempt = 0
         with part_path.open("ab" if received else "wb") as fh:
             while True:
+                gate_sync(self.consumer, self.ratelimit)
                 kwargs = self.spec.to_kwargs()
                 kwargs["headers"] = resume_headers(self.spec, received, validator) or None
                 try:
@@ -121,14 +123,13 @@ class Downloader:
         return target
 
 
-class AsyncDownloader:
+class AsyncDownloader(msgspec.Struct, frozen=True):
     """Bound, not-yet-executed resumable download, returned by a `-> AsyncDownloader` endpoint."""
 
-    def __init__(self, consumer: AsyncConsumer, spec: RequestSpec, retry: Retry) -> None:
-        """Binds the download to `consumer` and the resolved request `spec`."""
-        self.consumer = consumer
-        self.spec = spec
-        self.retry = retry
+    consumer: AsyncConsumer
+    spec: RequestSpec
+    retry: Retry
+    ratelimit: RateLimit | None = None
 
     async def __call__(self, path: StrPath, *, overwrite: bool = False) -> Path:
         """Downloads (or resumes) to `path`, returning it once the download completes cleanly.
@@ -149,6 +150,7 @@ class AsyncDownloader:
         attempt = 0
         with part_path.open("ab" if received else "wb") as fh:
             while True:
+                await gate_async(self.consumer, self.ratelimit)
                 kwargs = self.spec.to_kwargs()
                 kwargs["headers"] = resume_headers(self.spec, received, validator) or None
                 try:

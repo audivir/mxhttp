@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 class RateLimitExceededError(Exception):
-    """A call would have to wait past `RateLimit.max_delay`, or `RateLimit.block` is `False`."""
+    """The call exceeded the rate limit without blocking, or the wait exceeded `max_delay`."""
 
 
 class RateLimit(msgspec.Struct, frozen=True):
@@ -48,18 +48,18 @@ class Window:
         self.lock = threading.Lock()
 
 
-_windows: dict[tuple[str, int], Window] = {}
-_windows_guard = threading.Lock()
+windows: dict[tuple[str, int], Window] = {}
+windows_guard = threading.Lock()
 
 
 def get_window(host: str, port: int) -> Window:
     """Returns the shared rate-limit window for `(host, port)`, creating it on first use."""
     key = (host, port)
-    with _windows_guard:
-        window = _windows.get(key)
+    with windows_guard:
+        window = windows.get(key)
         if window is None:
             window = Window()
-            _windows[key] = window
+            windows[key] = window
         return window
 
 
