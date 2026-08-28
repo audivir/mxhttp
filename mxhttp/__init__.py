@@ -7,6 +7,7 @@ from mxhttp.download import (
     AsyncDownloader,
     Downloader,
     DownloadIdentityError,
+    DownloadLockError,
     DownloadState,
     ProgressCallback,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "Body",
     "Cookie",
     "DownloadIdentityError",
+    "DownloadLockError",
     "DownloadState",
     "Downloader",
     "Event",

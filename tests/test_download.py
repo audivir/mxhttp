@@ -19,6 +19,7 @@ from mxhttp import (
     AsyncDownloader,
     Downloader,
     DownloadIdentityError,
+    DownloadLockError,
     DownloadState,
     RateLimit,
     RateLimitExceededError,
@@ -137,7 +138,7 @@ async def test_download_completes_and_returns_path(
 
     assert result == target
     assert target.read_bytes() == b"hello world"
-    part_path, state_path = part_paths(target)
+    part_path, state_path, _ = part_paths(target)
     assert not part_path.exists()
     assert not state_path.exists()
 
@@ -157,7 +158,7 @@ def test_download_resumes_across_separate_calls(tmp_path: Path) -> None:
 
     consumer = make_consumer(DownloadApi, handler)
     target = tmp_path / "file.bin"
-    part_path, state_path = part_paths(target)
+    part_path, state_path, _ = part_paths(target)
 
     with pytest.raises(httpx.ReadError):
         consumer.download_one_shot(file_id=1)(target)
@@ -187,7 +188,7 @@ async def test_download_identity_mismatch_raises(
 
     consumer = make_consumer(cls, handler)
     target = tmp_path / "file.bin"
-    part_path, state_path = part_paths(target)
+    part_path, state_path, _ = part_paths(target)
     part_path.write_bytes(b"stale partial data")
     state_path.write_bytes(
         msgspec.json.encode(DownloadState(url="/different/file", etag=None, last_modified=None))
@@ -216,7 +217,7 @@ async def test_download_overwrite_discards_mismatched_part_file(
 
     consumer = make_consumer(cls, handler)
     target = tmp_path / "file.bin"
-    part_path, state_path = part_paths(target)
+    part_path, state_path, _ = part_paths(target)
     part_path.write_bytes(b"stale partial data")
     state_path.write_bytes(
         msgspec.json.encode(DownloadState(url="/different/file", etag=None, last_modified=None))
@@ -286,7 +287,7 @@ async def test_async_download_resumes_across_separate_calls(tmp_path: Path) -> N
 
     consumer = make_consumer(AsyncDownloadApi, handler)
     target = tmp_path / "file.bin"
-    part_path, state_path = part_paths(target)
+    part_path, state_path, _ = part_paths(target)
 
     first_downloader = await consumer.download_one_shot(file_id=1)
     with pytest.raises(httpx.ReadError):
@@ -463,3 +464,27 @@ def test_download_reports_progress_on_resume(tmp_path: Path) -> None:
 
     assert events == [(6, 11), (11, 11)]
     assert target.read_bytes() == b"hello world"
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_download_raises_lock_error_when_locked(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    from filelock import FileLock
+
+    target = tmp_path / "file.bin"
+    _, _, lock_path = part_paths(target)
+    handler = MagicMock()
+    consumer = make_consumer(cls, handler)
+
+    with FileLock(lock_path):
+        if isinstance(consumer, AsyncDownloadApi):
+            async_dl = await consumer.download(file_id=1)
+            with pytest.raises(DownloadLockError):
+                await async_dl(target)
+        else:
+            sync_dl = consumer.download(file_id=1)
+            with pytest.raises(DownloadLockError):
+                sync_dl(target)
+
+    handler.assert_not_called()
