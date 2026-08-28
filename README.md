@@ -97,11 +97,11 @@ For an async client, subclass `AsyncConsumer` and declare the methods `async def
 
 ### Response handling
 
-By default, every response is checked by `response.raise_for_status()` before decoding, so errors during the request raise `httpx.HTTPStatusError` automatically. This behavior can be overriden by `@response_handler` decorator for the class.
+By default, every response is checked by `response.raise_for_status()` before decoding, so errors during the request raise `httpx.HTTPStatusError` automatically. This behavior can be overridden by `@response_handler` and `@streaming_response_handler` class decorators.
 
 ```python
 import httpx
-from mxhttp import response_handler
+from mxhttp import response_handler, streaming_response_handler
 
 
 def ignore_errors(response: httpx.Response) -> httpx.Response:
@@ -109,10 +109,11 @@ def ignore_errors(response: httpx.Response) -> httpx.Response:
 
 
 @response_handler(ignore_errors)
+@streaming_response_handler(ignore_errors)
 class Shop(SyncConsumer): ...
 ```
 
-The hook runs on every response before decoding.
+The `@response_handler` hook runs on buffered responses before decoding. For streaming and SSE endpoints, `@streaming_response_handler` inspects the initial status line and headers before chunks or events are yielded.
 
 ### Retries
 
@@ -157,10 +158,11 @@ class Shop(SyncConsumer):
     def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
 ```
 
-- The limit is scoped to the `(host, port)` being called, shared across every consumer instance and every endpoint on that class, not counted per instance or per endpoint.
-- Unlike `@retry`, this applies to every endpoint kind, including streaming and SSE.
+- The limit is scoped to the `(host, port)` being called, shared across consumer instances and endpoints using the same configuration.
+- Unlike `@retry`, this applies to every endpoint kind, including streaming, SSE, and downloads.
 - By default, a call over the limit blocks until the current window resets. Set `block=False` to raise `RateLimitExceededError` immediately instead, or `max_delay=` to raise instead of blocking past that many seconds.
-- Pass `ratelimit=` directly to `@get`/`@post`/etc. to override the class's `RateLimit` config for that one endpoint, or `ratelimit=None` to disable rate limiting for it, the same way `retry=` works.
+- Pass `key="custom_pool"` to `RateLimit` to partition rate limits into dedicated pools or keep method quotas isolated from each other.
+- Pass `ratelimit=` directly to `@get`/`@post`/etc. to override the class configuration for that one endpoint, or `ratelimit=None` to disable rate limiting for it, the same way `retry=` works.
 
 ### Streaming responses
 
@@ -222,7 +224,10 @@ class Files(SyncConsumer):
 
 
 downloader = shop_files.download(file_id=7)
-path = downloader("/tmp/report.pdf")  # runs the download, returns the path once it completes
+path = downloader(
+    "/tmp/report.pdf",
+    on_progress=lambda received, total: print(f"Progress: {received}/{total}"),
+)
 
 # if the process is killed partway through, calling it again resumes from disk:
 path = shop_files.download(file_id=7)("/tmp/report.pdf")
@@ -230,21 +235,10 @@ path = shop_files.download(file_id=7)("/tmp/report.pdf")
 
 - The endpoint is called once to bind it (no network activity yet); the returned `Downloader`/`AsyncDownloader` is then called with a destination path to actually run (or resume) the download.
 - Reconnects the same way `resumable=` streaming does, defaulting to `Retry()` if no `resumable=` override is given, since resumability is the point of this return type.
-- Downloads to `{path}.part` plus a `{path}.part.json` sidecar recording the source URL and `ETag`/`Last-Modified`, flushing and `fsync`-ing after every chunk. Only on a clean finish is `{path}.part` atomically renamed to `path` and the sidecar removed, so `path` itself is never observed half-written.
+- Downloads to `{path}.part` plus a `{path}.part.json` sidecar recording the source URL and `ETag`/`Last-Modified`. Only on a clean finish is `{path}.part` atomically renamed to `path` and the sidecar removed, so `path` itself is never observed half-written.
+- Non-blocking advisory file locking protects concurrent writers from data corruption, raising `DownloadLockError` on contention and releasing cleanly on process exit or termination signals.
 - Calling the `Downloader` again for the same `path` resumes from `{path}.part` if its sidecar identity matches the current request; a mismatch raises `DownloadIdentityError` rather than silently appending to or discarding the wrong data. Pass `overwrite=True` to discard whatever is there and start over.
-
-```python
-from mxhttp import streaming_response_handler
-
-
-def check_status(response: httpx.Response) -> httpx.Response:
-    response.raise_for_status()
-    return response
-
-
-@streaming_response_handler(check_status)
-class Files(SyncConsumer): ...
-```
+- Pass `on_progress=` to receive progress updates `(received_bytes, total_bytes_or_None)` as chunks arrive.
 
 ### Server-Sent Events
 
