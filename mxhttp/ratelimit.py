@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from typing import TYPE_CHECKING, TypeAlias
@@ -111,8 +112,6 @@ def acquire_sync(config: RateLimit, base_url: str) -> None:
 
 async def acquire_async(config: RateLimit, base_url: str) -> None:
     """Blocks, or raises `RateLimitExceededError`, until a call slot for the host is free."""
-    import asyncio
-
     host, port = host_port(base_url)
     delay = wait_time(get_window(host, port, config), config)
     if delay <= 0:

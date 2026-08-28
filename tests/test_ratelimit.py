@@ -341,9 +341,7 @@ def test_ratelimit_window_isolated_by_key(monkeypatch: pytest.MonkeyPatch) -> No
     clock = FakeClock()
     monkeypatch.setattr(time, "monotonic", clock)
 
-    consumer = make_consumer(
-        KeyedLimitApi, ITEM, base_url="https://ratelimit-keyed.example.com"
-    )
+    consumer = make_consumer(KeyedLimitApi, ITEM, base_url="https://ratelimit-keyed.example.com")
 
     assert consumer.get_a() == ITEM
     with pytest.raises(RateLimitExceededError):

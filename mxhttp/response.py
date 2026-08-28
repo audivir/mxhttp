@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Generic, get_args, get_origin, overload
@@ -215,8 +216,6 @@ async def resumable_stream_async(
         ResumeLostError: If a reconnect gets a full (`200`) body instead of a partial (`206`) one,
             meaning the server ignored `Range` or the resource changed underneath the download.
     """
-    import asyncio
-
     received = 0
     validator: str | None = None
     attempt = 0

@@ -443,9 +443,7 @@ def test_download_reports_progress_on_resume(tmp_path: Path) -> None:
                 headers={"ETag": '"v1"', "Content-Length": "11"},
                 stream=FailingSyncStream([b"hello "], httpx.ReadError("boom")),
             )
-        return httpx.Response(
-            206, headers={"Content-Range": "bytes 6-10/11"}, content=b"world"
-        )
+        return httpx.Response(206, headers={"Content-Range": "bytes 6-10/11"}, content=b"world")
 
     consumer = make_consumer(DownloadApi, handler)
     target = tmp_path / "file.bin"
@@ -458,9 +456,7 @@ def test_download_reports_progress_on_resume(tmp_path: Path) -> None:
     assert events == [(0, 11), (6, 11)]
 
     events.clear()
-    consumer.download_one_shot(file_id=1)(
-        target, on_progress=lambda r, t: events.append((r, t))
-    )
+    consumer.download_one_shot(file_id=1)(target, on_progress=lambda r, t: events.append((r, t)))
 
     assert events == [(6, 11), (11, 11)]
     assert target.read_bytes() == b"hello world"

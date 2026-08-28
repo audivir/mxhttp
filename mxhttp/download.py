@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias
 
+import anyio
 import msgspec
-from filelock import FileLock, Timeout
+from filelock import AsyncFileLock, FileLock, Timeout
 
 from mxhttp.ratelimit import gate_async, gate_sync
 from mxhttp.response import ResumeLostError, apply_streaming_response_handler, resume_headers
@@ -23,7 +25,6 @@ from mxhttp.retry import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    import anyio
     import httpx
     from _typeshed import StrPath
 
@@ -35,9 +36,7 @@ if TYPE_CHECKING:
 ProgressCallback: TypeAlias = "Callable[[int, int | None], None]"
 
 
-def _notify(
-    callback: ProgressCallback | None, received: int, total: int | None
-) -> None:
+def _notify(callback: ProgressCallback | None, received: int, total: int | None) -> None:
     """Invokes the synchronous progress callback if provided."""
     if callback is not None:
         callback(received, total)
@@ -202,17 +201,13 @@ class Downloader(msgspec.Struct, frozen=True):
                             attempt += 1
                             if attempt >= self.retry.attempts:
                                 raise
-                            time.sleep(
-                                resolve_delay(self.retry, attempt, extract_response(exc))
-                            )
+                            time.sleep(resolve_delay(self.retry, attempt, extract_response(exc)))
 
                 part_path.replace(target)
                 state_path.unlink(missing_ok=True)
                 return target
         except Timeout as exc:
-            raise DownloadLockError(
-                f"Download to {target} is locked by another process"
-            ) from exc
+            raise DownloadLockError(f"Download to {target} is locked by another process") from exc
 
 
 class AsyncDownloader(msgspec.Struct, frozen=True):
@@ -237,11 +232,6 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                 `overwrite=True` to discard it and start over.
             ResumeLostError: If a reconnect gets a full response instead of a partial one.
         """
-        import asyncio
-
-        import anyio
-        from filelock import AsyncFileLock
-
         target = anyio.Path(path)
         part_path = target.with_name(target.name + ".part")
         state_path = target.with_name(target.name + ".part.json")
@@ -257,18 +247,13 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                     while True:
                         await gate_async(self.consumer, self.ratelimit)
                         kwargs = self.spec.to_kwargs()
-                        kwargs["headers"] = (
-                            resume_headers(self.spec, received, validator) or None
-                        )
+                        kwargs["headers"] = resume_headers(self.spec, received, validator) or None
                         try:
                             async with self.consumer.session.stream(
                                 self.spec.method, self.spec.url, **kwargs
                             ) as response:
                                 apply_streaming_response_handler(self.consumer, response)
-                                if (
-                                    received
-                                    and response.status_code != HTTPStatus.PARTIAL_CONTENT
-                                ):
+                                if received and response.status_code != HTTPStatus.PARTIAL_CONTENT:
                                     raise ResumeLostError(
                                         "server ignored Range or the resource changed"
                                     )
@@ -299,6 +284,4 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                 await state_path.unlink(missing_ok=True)
                 return Path(path)
         except Timeout as exc:
-            raise DownloadLockError(
-                f"Download to {target} is locked by another process"
-            ) from exc
+            raise DownloadLockError(f"Download to {target} is locked by another process") from exc

@@ -234,9 +234,7 @@ async def test_resumable_retries_transient_status_code(
         calls += 1
         if calls == 1:
             return (
-                httpx.Response(
-                    200, stream=FailingSyncStream([b"hello "], httpx.ReadError("boom"))
-                )
+                httpx.Response(200, stream=FailingSyncStream([b"hello "], httpx.ReadError("boom")))
                 if issubclass(cls, SyncConsumer)
                 else httpx.Response(
                     200, stream=FailingAsyncStream([b"hello "], httpx.ReadError("boom"))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import email.utils
 import random
 import time
@@ -186,8 +187,6 @@ async def request_async(
     self: AsyncConsumer, spec: RequestSpec, config: Retry | None
 ) -> httpx.Response:
     """Sends `spec`, retrying according to `config` if one is given."""
-    import asyncio
-
     if config is None:
         return await self.session.request(spec.method, spec.url, **spec.to_kwargs())
 
