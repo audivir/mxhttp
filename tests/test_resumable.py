@@ -221,3 +221,59 @@ async def test_resumable_exhausts_attempts_then_reraises_async() -> None:
     stream = await consumer.download_one_shot(file_id=1)
     with pytest.raises(httpx.ReadError):
         b"".join([chunk async for chunk in stream])
+
+
+@pytest.mark.parametrize("cls", [ResumableApi, AsyncResumableApi], ids=["sync", "async"])
+async def test_resumable_retries_transient_status_code(
+    cls: type[ResumableApi | AsyncResumableApi],
+) -> None:
+    calls = 0
+
+    def handler(unused_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return (
+                httpx.Response(
+                    200, stream=FailingSyncStream([b"hello "], httpx.ReadError("boom"))
+                )
+                if issubclass(cls, SyncConsumer)
+                else httpx.Response(
+                    200, stream=FailingAsyncStream([b"hello "], httpx.ReadError("boom"))
+                )
+            )
+        if calls == 2:
+            return httpx.Response(503, headers={"Retry-After": "0"})
+        return httpx.Response(206, content=b"world")
+
+    consumer = make_consumer(cls, handler)
+    if isinstance(consumer, AsyncResumableApi):
+        stream = await consumer.download(file_id=1)
+        chunks = [chunk async for chunk in stream]
+    else:
+        chunks = list(consumer.download(file_id=1))
+
+    assert b"".join(chunks) == b"hello world"
+    assert calls == 3
+
+
+@pytest.mark.parametrize("cls", [ResumableApi, AsyncResumableApi], ids=["sync", "async"])
+async def test_resumable_unretryable_status_code_raises_immediately(
+    cls: type[ResumableApi | AsyncResumableApi],
+) -> None:
+    calls = 0
+
+    def handler(unused_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(404)
+
+    consumer = make_consumer(cls, handler)
+    with pytest.raises(httpx.HTTPStatusError):  # noqa: PT012
+        if isinstance(consumer, AsyncResumableApi):
+            stream = await consumer.download(file_id=1)
+            _ = [chunk async for chunk in stream]
+        else:
+            _ = list(consumer.download(file_id=1))
+
+    assert calls == 1

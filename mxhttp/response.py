@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING, Generic, get_args, get_origin, overload
 
 import msgspec
 
-from mxhttp.retry import exception_types, resolve_delay
+from mxhttp.retry import (
+    extract_response,
+    is_retryable_exception,
+    resolve_delay,
+    retryable_exceptions,
+)
 from mxhttp.sse import Event, SseBuilder
 from mxhttp.types import AnyC_T, Parsed_T, ResponseHandler, is_parsed_type
 
@@ -190,11 +195,13 @@ def resumable_stream_sync(self: SyncConsumer, spec: RequestSpec, config: Retry) 
                     received += len(chunk)
                     yield chunk
                 return
-        except exception_types(config.on):
+        except retryable_exceptions(config.on) as exc:
+            if not is_retryable_exception(exc, config):
+                raise
             attempt += 1
             if attempt >= config.attempts:
                 raise
-            time.sleep(resolve_delay(config, attempt, None))
+            time.sleep(resolve_delay(config, attempt, extract_response(exc)))
 
 
 async def resumable_stream_async(
@@ -229,11 +236,13 @@ async def resumable_stream_async(
                     received += len(chunk)
                     yield chunk
                 return
-        except exception_types(config.on):
+        except retryable_exceptions(config.on) as exc:
+            if not is_retryable_exception(exc, config):
+                raise
             attempt += 1
             if attempt >= config.attempts:
                 raise
-            await asyncio.sleep(resolve_delay(config, attempt, None))
+            await asyncio.sleep(resolve_delay(config, attempt, extract_response(exc)))
 
 
 def sse_sync(self: SyncConsumer, spec: RequestSpec) -> Iterator[Event]:

@@ -13,7 +13,12 @@ from filelock import FileLock, Timeout
 
 from mxhttp.ratelimit import gate_async, gate_sync
 from mxhttp.response import ResumeLostError, apply_streaming_response_handler, resume_headers
-from mxhttp.retry import exception_types, resolve_delay
+from mxhttp.retry import (
+    extract_response,
+    is_retryable_exception,
+    resolve_delay,
+    retryable_exceptions,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -191,11 +196,15 @@ class Downloader(msgspec.Struct, frozen=True):
                                     received += len(chunk)
                                     _notify(on_progress, received, total)
                             break
-                        except exception_types(self.retry.on):
+                        except retryable_exceptions(self.retry.on) as exc:
+                            if not is_retryable_exception(exc, self.retry):
+                                raise
                             attempt += 1
                             if attempt >= self.retry.attempts:
                                 raise
-                            time.sleep(resolve_delay(self.retry, attempt, None))
+                            time.sleep(
+                                resolve_delay(self.retry, attempt, extract_response(exc))
+                            )
 
                 part_path.replace(target)
                 state_path.unlink(missing_ok=True)
@@ -275,12 +284,16 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                                     _notify(on_progress, received, total)
                             await fh.flush()
                             break
-                        except exception_types(self.retry.on):
+                        except retryable_exceptions(self.retry.on) as exc:
+                            if not is_retryable_exception(exc, self.retry):
+                                raise
                             attempt += 1
                             if attempt >= self.retry.attempts:
                                 raise
                             await fh.flush()
-                            await asyncio.sleep(resolve_delay(self.retry, attempt, None))
+                            await asyncio.sleep(
+                                resolve_delay(self.retry, attempt, extract_response(exc))
+                            )
 
                 await part_path.replace(target)
                 await state_path.unlink(missing_ok=True)

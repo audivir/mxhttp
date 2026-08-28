@@ -488,3 +488,67 @@ async def test_download_raises_lock_error_when_locked(
                 sync_dl(target)
 
     handler.assert_not_called()
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_download_retries_transient_status_code(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    calls = 0
+
+    def handler(unused_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return (
+                httpx.Response(
+                    200,
+                    headers={"ETag": '"v1"'},
+                    stream=FailingSyncStream([b"hello "], httpx.ReadError("boom")),
+                )
+                if issubclass(cls, SyncConsumer)
+                else httpx.Response(
+                    200,
+                    headers={"ETag": '"v1"'},
+                    stream=FailingAsyncStream([b"hello "], httpx.ReadError("boom")),
+                )
+            )
+        if calls == 2:
+            return httpx.Response(503, headers={"Retry-After": "0"})
+        return httpx.Response(206, content=b"world")
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "file.bin"
+    if isinstance(consumer, AsyncDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        assert await async_dl(target) == target
+    else:
+        sync_dl = consumer.download(file_id=1)
+        assert sync_dl(target) == target
+
+    assert target.read_bytes() == b"hello world"
+    assert calls == 3
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_download_unretryable_status_code_raises_immediately(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    calls = 0
+
+    def handler(unused_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(404)
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "file.bin"
+    with pytest.raises(httpx.HTTPStatusError):  # noqa: PT012
+        if isinstance(consumer, AsyncDownloadApi):
+            async_dl = await consumer.download(file_id=1)
+            await async_dl(target)
+        else:
+            sync_dl = consumer.download(file_id=1)
+            sync_dl(target)
+
+    assert calls == 1

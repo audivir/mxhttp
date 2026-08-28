@@ -427,3 +427,40 @@ async def test_retry_after_overrides_computed_backoff_async(
     consumer = make_consumer(AsyncRetryAfterApi, retry_after_handler("10"))
     assert await consumer.get_item(item_id=1) == ITEM
     assert delays == [10.0]
+
+
+def test_retry_after_handles_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr(time, "sleep", delays.append)
+
+    consumer = make_consumer(RetryAfterApi, retry_after_handler("  10  "))
+    assert consumer.get_item(item_id=1) == ITEM
+    assert delays == [10.0]
+
+
+def test_is_retryable_exception_and_extract_response() -> None:
+    from mxhttp.retry import extract_response, is_retryable_exception
+
+    retry_config = Retry(attempts=3, on=(503, httpx.ConnectError))
+
+    # HTTPStatusError matching status code
+    resp_503 = httpx.Response(503, request=httpx.Request("GET", "https://example.com"))
+    err_503 = httpx.HTTPStatusError("503", request=resp_503.request, response=resp_503)
+    assert is_retryable_exception(err_503, retry_config) is True
+    assert extract_response(err_503) is resp_503
+
+    # HTTPStatusError not matching status code
+    resp_404 = httpx.Response(404, request=httpx.Request("GET", "https://example.com"))
+    err_404 = httpx.HTTPStatusError("404", request=resp_404.request, response=resp_404)
+    assert is_retryable_exception(err_404, retry_config) is False
+    assert extract_response(err_404) is resp_404
+
+    # TransportError matching exception types
+    conn_err = httpx.ConnectError("boom")
+    assert is_retryable_exception(conn_err, retry_config) is True
+    assert extract_response(conn_err) is None
+
+    # Exception not matching
+    val_err = ValueError("other")
+    assert is_retryable_exception(val_err, retry_config) is False
+    assert extract_response(val_err) is None

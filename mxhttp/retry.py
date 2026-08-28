@@ -45,6 +45,13 @@ def exception_types(on: Collection[RetryOn]) -> tuple[type[BaseException], ...]:
     return tuple(entry for entry in on if isinstance(entry, type))
 
 
+def retryable_exceptions(on: Collection[RetryOn]) -> tuple[type[BaseException], ...]:
+    """Returns all exception types to catch, including `HTTPStatusError` for status-code checks."""
+    import httpx
+
+    return (httpx.HTTPStatusError, *exception_types(on))
+
+
 def matches_response(on: Collection[RetryOn], response: httpx.Response) -> bool:
     """Checks whether `response` satisfies a status-code or predicate entry in `on`."""
     for entry in on:
@@ -86,15 +93,32 @@ class Retry(msgspec.Struct, frozen=True):
 
 def parse_retry_after(value: str) -> float | None:
     """Parses a `Retry-After` header value as a delay in seconds, from seconds or an HTTP-date."""
-    if value.isdigit():
-        return float(value)
+    cleaned = value.strip()
+    if cleaned.isdigit():
+        return float(cleaned)
     try:
-        target = email.utils.parsedate_to_datetime(value)
+        target = email.utils.parsedate_to_datetime(cleaned)
     except (TypeError, ValueError):
         return None
     if target.tzinfo is None:
         target = target.replace(tzinfo=timezone.utc)
     return (target - datetime.now(timezone.utc)).total_seconds()
+
+
+def is_retryable_exception(exc: BaseException, config: Retry) -> bool:
+    """Checks whether an exception or its enclosed response matches the retry config."""
+    import httpx
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        return matches_response(config.on, exc.response)
+    return isinstance(exc, exception_types(config.on))
+
+
+def extract_response(exc: BaseException) -> httpx.Response | None:
+    """Extracts the underlying HTTP response from an exception if present."""
+    import httpx
+
+    return exc.response if isinstance(exc, httpx.HTTPStatusError) else None
 
 
 def resolve_delay(config: Retry, attempt: int, response: httpx.Response | None) -> float:
