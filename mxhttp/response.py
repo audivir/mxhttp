@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import time
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Generic, get_args, get_origin, overload
 
 import msgspec
 
+from mxhttp.retry import exception_types, resolve_delay
 from mxhttp.sse import Event, SseBuilder
 from mxhttp.types import AnyC_T, Parsed_T, ResponseHandler, is_parsed_type
 
@@ -17,6 +20,11 @@ if TYPE_CHECKING:
 
     from mxhttp.consumer import AsyncConsumer, BaseConsumer, SyncConsumer
     from mxhttp.request import RequestSpec
+    from mxhttp.retry import Retry
+
+
+class ResumeLostError(Exception):
+    """A resumable reconnect got a full body instead of the requested partial `Range`."""
 
 
 class Response(msgspec.Struct, Generic[Parsed_T]):
@@ -142,6 +150,90 @@ async def stream_async(self: AsyncConsumer, spec: RequestSpec) -> AsyncIterator[
         apply_streaming_response_handler(self, response)
         async for chunk in response.aiter_bytes():
             yield chunk
+
+
+def resume_headers(spec: RequestSpec, received: int, validator: str | None) -> dict[str, str]:
+    """Builds the headers for a (re)connect attempt, adding `Range`/`If-Range` once bytes exist."""
+    headers = dict(spec.headers or {})
+    if received:
+        headers["Range"] = f"bytes={received}-"
+        if validator is not None:
+            headers["If-Range"] = validator
+    return headers
+
+
+def resumable_stream_sync(self: SyncConsumer, spec: RequestSpec, config: Retry) -> Iterator[bytes]:
+    """Streams the response body, reconnecting with `Range` on a transport error mid-stream.
+
+    Runs the `@streaming_response_handler` hook once per (re)connect.
+
+    Raises:
+        ResumeLostError: If a reconnect gets a full (`200`) body instead of a partial (`206`) one,
+            meaning the server ignored `Range` or the resource changed underneath the download.
+    """
+    received = 0
+    validator: str | None = None
+    attempt = 0
+    while True:
+        kwargs = spec.to_kwargs()
+        kwargs["headers"] = resume_headers(spec, received, validator) or None
+        try:
+            with self.session.stream(spec.method, spec.url, **kwargs) as response:
+                apply_streaming_response_handler(self, response)
+                if received and response.status_code != HTTPStatus.PARTIAL_CONTENT:
+                    raise ResumeLostError("server ignored Range or the resource changed")
+                if validator is None:
+                    validator = response.headers.get("etag") or response.headers.get(
+                        "last-modified"
+                    )
+                for chunk in response.iter_bytes():
+                    received += len(chunk)
+                    yield chunk
+                return
+        except exception_types(config.on):
+            attempt += 1
+            if attempt >= config.attempts:
+                raise
+            time.sleep(resolve_delay(config, attempt, None))
+
+
+async def resumable_stream_async(
+    self: AsyncConsumer, spec: RequestSpec, config: Retry
+) -> AsyncIterator[bytes]:
+    """Streams the response body, reconnecting with `Range` on a transport error mid-stream.
+
+    Runs the `@streaming_response_handler` hook once per (re)connect.
+
+    Raises:
+        ResumeLostError: If a reconnect gets a full (`200`) body instead of a partial (`206`) one,
+            meaning the server ignored `Range` or the resource changed underneath the download.
+    """
+    import asyncio
+
+    received = 0
+    validator: str | None = None
+    attempt = 0
+    while True:
+        kwargs = spec.to_kwargs()
+        kwargs["headers"] = resume_headers(spec, received, validator) or None
+        try:
+            async with self.session.stream(spec.method, spec.url, **kwargs) as response:
+                apply_streaming_response_handler(self, response)
+                if received and response.status_code != HTTPStatus.PARTIAL_CONTENT:
+                    raise ResumeLostError("server ignored Range or the resource changed")
+                if validator is None:
+                    validator = response.headers.get("etag") or response.headers.get(
+                        "last-modified"
+                    )
+                async for chunk in response.aiter_bytes():
+                    received += len(chunk)
+                    yield chunk
+                return
+        except exception_types(config.on):
+            attempt += 1
+            if attempt >= config.attempts:
+                raise
+            await asyncio.sleep(resolve_delay(config, attempt, None))
 
 
 def sse_sync(self: SyncConsumer, spec: RequestSpec) -> Iterator[Event]:

@@ -22,6 +22,8 @@ from mxhttp.request import RequestSpec, build_plan, build_request
 from mxhttp.response import (
     apply_response_handler,
     decode,
+    resumable_stream_async,
+    resumable_stream_sync,
     sse_async,
     sse_sync,
     stream_async,
@@ -89,11 +91,12 @@ class EndpointDecorator(Protocol):
     ) -> Callable[Concatenate[AsyncC_T, P], Coroutine[Any, Any, AsyncIterator[Event]]]: ...
 
 
-def endpoint(  # noqa: C901
+def endpoint(  # noqa: C901, PLR0915
     method: Method_T,
     path: str,
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
+    resumable: Retry | None = None,
 ) -> EndpointDecorator:
     """Shared implementation for the HTTP method decorator factories.
 
@@ -104,6 +107,9 @@ def endpoint(  # noqa: C901
             Pass `None` explicitly to disable retries for this endpoint only.
         ratelimit: Overrides the class-level `RateLimit` config for this endpoint only.
             Pass `None` explicitly to disable rate limiting for this endpoint only.
+        resumable: Reconnects with `Range` (using this `Retry` for reconnect attempts and
+            backoff) if the connection drops mid-stream. Only valid for `GET` endpoints
+            returning `Iterator[bytes]`/`AsyncIterator[bytes]`.
     """
 
     def decorate(  # noqa: C901
@@ -121,6 +127,14 @@ def endpoint(  # noqa: C901
         is_raw_stream = stream_item is bytes
         is_sse_stream = stream_item is Event
         has_cookies = any(p.kind == "cookie" for p in plan)
+
+        if resumable is not None:
+            if method != "GET":
+                raise TypeError("resumable is only valid for GET endpoints")
+            if not is_raw_stream:
+                raise TypeError(
+                    "resumable is only valid for Iterator[bytes]/AsyncIterator[bytes] endpoints"
+                )
 
         def resolve_spec(self: BaseConsumer, *args: P.args, **kwargs: P.kwargs) -> RequestSpec:
             """Binds call arguments against the stub signature and builds the request spec."""
@@ -158,6 +172,8 @@ def endpoint(  # noqa: C901
                 ) -> AsyncIterator[bytes]:
                     await gate_async(self, resolve_ratelimit(self))
                     spec = resolve_spec(self, *args, **kwargs)
+                    if resumable is not None:
+                        return resumable_stream_async(self, spec, resumable)
                     return stream_async(self, spec)
 
                 return async_stream_wrapper  # type: ignore[return-value]
@@ -193,6 +209,8 @@ def endpoint(  # noqa: C901
             ) -> Iterator[bytes]:
                 gate_sync(self, resolve_ratelimit(self))
                 spec = resolve_spec(self, *args, **kwargs)
+                if resumable is not None:
+                    return resumable_stream_sync(self, spec, resumable)
                 return stream_sync(self, spec)
 
             return sync_stream_wrapper  # type: ignore[return-value]
@@ -217,9 +235,10 @@ def get(
     path: str,
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
+    resumable: Retry | None = None,
 ) -> EndpointDecorator:
     """Declares a stub method as `GET {path}`."""
-    return endpoint("GET", path, retry, ratelimit)
+    return endpoint("GET", path, retry, ratelimit, resumable)
 
 
 def post(

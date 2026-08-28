@@ -193,6 +193,21 @@ async for chunk in await shop_async_files.download(file_id=7):
 Streaming responses run `@streaming_response_handler` instead of `@response_handler` (defaults to `raise_for_status` as well).
 The handler can only inspect status line and headers.
 
+#### Resumable downloads
+
+Pass `resumable=Retry(...)` to `@get` on a byte-streaming endpoint to reconnect with a `Range` request instead of restarting from scratch if the connection drops mid-download:
+
+```python
+class Files(SyncConsumer):
+    @get("/files/{file_id}", resumable=Retry(attempts=3, backoff=1.0))
+    def download(self, file_id: int) -> Iterator[bytes]: ...  # type: ignore[empty-body]
+```
+
+- Only valid for `GET` endpoints returning `Iterator[bytes]`/`AsyncIterator[bytes]`; raises `TypeError` at class-body time otherwise.
+- The `Retry` config controls reconnect attempts and backoff the same way it does for regular endpoints; `on` decides which mid-stream exceptions trigger a reconnect.
+- If the server sent an `ETag` or `Last-Modified` on the first response, it is sent back as `If-Range` on reconnects.
+- If a reconnect gets a full (`200`) response instead of a partial (`206`) one, meaning the server ignored `Range` or the underlying resource changed, `ResumeLostError` is raised rather than silently restarting or splicing mismatched bytes.
+
 ```python
 from mxhttp import streaming_response_handler
 
