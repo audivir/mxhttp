@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
     import httpx
 
+    from mxhttp.ratelimit import RateLimit
     from mxhttp.retry import Retry
     from mxhttp.types import ResponseHandler
 
@@ -21,6 +22,7 @@ class BaseConsumer:
     _response_handler: ResponseHandler | None = None
     _streaming_response_handler: ResponseHandler | None = None
     _retry: Retry | None = None
+    _ratelimit: RateLimit | None = None
 
     def __init__(
         self,

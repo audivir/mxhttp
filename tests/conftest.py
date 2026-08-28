@@ -30,6 +30,7 @@ def make_consumer(
     response: Callable[[httpx.Request], Parsed_T] | Parsed_T,
     *,
     status_code: int = 200,
+    base_url: str = "https://api.example.com",
     track_requests: Literal[False] = False,
 ) -> AnyC_T: ...
 @overload
@@ -38,6 +39,7 @@ def make_consumer(
     response: Callable[[httpx.Request], Parsed_T] | Parsed_T,
     *,
     status_code: int = 200,
+    base_url: str = "https://api.example.com",
     track_requests: Literal[True] = ...,
 ) -> tuple[AnyC_T, list[httpx.Request]]: ...
 def make_consumer(
@@ -45,6 +47,7 @@ def make_consumer(
     response: Callable[[httpx.Request], Parsed_T] | Parsed_T,
     *,
     status_code: int = 200,
+    base_url: str = "https://api.example.com",
     track_requests: bool = False,
 ) -> AnyC_T | tuple[AnyC_T, list[httpx.Request]]:
     seen: list[httpx.Request] = []
@@ -64,7 +67,7 @@ def make_consumer(
         return http_response
 
     transport = httpx.MockTransport(handler)
-    consumer = cls("https://api.example.com")
+    consumer = cls(base_url)
 
     if issubclass(cls, SyncConsumer):
         consumer._session = httpx.Client(base_url=consumer.base_url, transport=transport)

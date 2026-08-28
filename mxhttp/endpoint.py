@@ -17,6 +17,7 @@ from typing import (
 )
 
 from mxhttp.parse import split_path_template
+from mxhttp.ratelimit import gate_async, gate_sync
 from mxhttp.request import RequestSpec, build_plan, build_request
 from mxhttp.response import (
     apply_response_handler,
@@ -33,6 +34,7 @@ from mxhttp.types import MISSING
 if TYPE_CHECKING:
     from mxhttp import AsyncConsumer, SyncConsumer
     from mxhttp.consumer import BaseConsumer
+    from mxhttp.ratelimit import RateLimit
     from mxhttp.retry import Retry
     from mxhttp.types import AnyC_T, AsyncC_T, Method_T, Missing, Parsed_T, SyncC_T
 
@@ -88,7 +90,10 @@ class EndpointDecorator(Protocol):
 
 
 def endpoint(  # noqa: C901
-    method: Method_T, path: str, retry: Retry | Missing | None = MISSING
+    method: Method_T,
+    path: str,
+    retry: Retry | Missing | None = MISSING,
+    ratelimit: RateLimit | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Shared implementation for the HTTP method decorator factories.
 
@@ -97,6 +102,8 @@ def endpoint(  # noqa: C901
         path: The relative endpoint.
         retry: Overrides the class-level `Retry` config for this endpoint only.
             Pass `None` explicitly to disable retries for this endpoint only.
+        ratelimit: Overrides the class-level `RateLimit` config for this endpoint only.
+            Pass `None` explicitly to disable rate limiting for this endpoint only.
     """
 
     def decorate(  # noqa: C901
@@ -126,6 +133,10 @@ def endpoint(  # noqa: C901
             """Resolves the endpoint retry override, falling back to the consumer default."""
             return self._retry if retry is MISSING else retry
 
+        def resolve_ratelimit(self: BaseConsumer) -> RateLimit | None:
+            """Resolves the endpoint rate-limit override, falling back to the consumer default."""
+            return self._ratelimit if ratelimit is MISSING else ratelimit
+
         if inspect.iscoroutinefunction(func):
             if is_sse_stream:
 
@@ -133,6 +144,7 @@ def endpoint(  # noqa: C901
                 async def async_sse_wrapper(
                     self: AsyncConsumer, *args: P.args, **kwargs: P.kwargs
                 ) -> AsyncIterator[Event]:
+                    await gate_async(self, resolve_ratelimit(self))
                     spec = resolve_spec(self, *args, **kwargs)
                     return sse_async(self, spec)
 
@@ -144,6 +156,7 @@ def endpoint(  # noqa: C901
                 async def async_stream_wrapper(
                     self: AsyncConsumer, *args: P.args, **kwargs: P.kwargs
                 ) -> AsyncIterator[bytes]:
+                    await gate_async(self, resolve_ratelimit(self))
                     spec = resolve_spec(self, *args, **kwargs)
                     return stream_async(self, spec)
 
@@ -153,6 +166,7 @@ def endpoint(  # noqa: C901
             async def async_wrapper(
                 self: AsyncConsumer, *args: P.args, **kwargs: P.kwargs
             ) -> Parsed_T:
+                await gate_async(self, resolve_ratelimit(self))
                 spec = resolve_spec(self, *args, **kwargs)
                 response = await request_async(self, spec, resolve_retry(self))
                 return decode(apply_response_handler(self, response), return_type)
@@ -165,6 +179,7 @@ def endpoint(  # noqa: C901
             def sync_sse_wrapper(
                 self: SyncConsumer, *args: P.args, **kwargs: P.kwargs
             ) -> Iterator[Event]:
+                gate_sync(self, resolve_ratelimit(self))
                 spec = resolve_spec(self, *args, **kwargs)
                 return sse_sync(self, spec)
 
@@ -176,6 +191,7 @@ def endpoint(  # noqa: C901
             def sync_stream_wrapper(
                 self: SyncConsumer, *args: P.args, **kwargs: P.kwargs
             ) -> Iterator[bytes]:
+                gate_sync(self, resolve_ratelimit(self))
                 spec = resolve_spec(self, *args, **kwargs)
                 return stream_sync(self, spec)
 
@@ -187,6 +203,7 @@ def endpoint(  # noqa: C901
             *args: P.args,
             **kwargs: P.kwargs,
         ) -> Parsed_T:
+            gate_sync(self, resolve_ratelimit(self))
             spec = resolve_spec(self, *args, **kwargs)
             response = request_sync(self, spec, resolve_retry(self))
             return decode(apply_response_handler(self, response), return_type)
@@ -199,46 +216,52 @@ def endpoint(  # noqa: C901
 def get(
     path: str,
     retry: Retry | Missing | None = MISSING,
+    ratelimit: RateLimit | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `GET {path}`."""
-    return endpoint("GET", path, retry)
+    return endpoint("GET", path, retry, ratelimit)
 
 
 def post(
     path: str,
     retry: Retry | Missing | None = MISSING,
+    ratelimit: RateLimit | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `POST {path}`."""
-    return endpoint("POST", path, retry)
+    return endpoint("POST", path, retry, ratelimit)
 
 
 def put(
     path: str,
     retry: Retry | Missing | None = MISSING,
+    ratelimit: RateLimit | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `PUT {path}`."""
-    return endpoint("PUT", path, retry)
+    return endpoint("PUT", path, retry, ratelimit)
 
 
 def patch(
     path: str,
     retry: Retry | Missing | None = MISSING,
+    ratelimit: RateLimit | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `PATCH {path}`."""
-    return endpoint("PATCH", path, retry)
+    return endpoint("PATCH", path, retry, ratelimit)
 
 
 def delete(
     path: str,
     retry: Retry | Missing | None = MISSING,
+    ratelimit: RateLimit | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `DELETE {path}`."""
-    return endpoint("DELETE", path, retry)
+    return endpoint("DELETE", path, retry, ratelimit)
 
 
 def head(
     path: str,
     retry: Retry | Missing | None = MISSING,
+    ratelimit: RateLimit | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `HEAD {path}`."""
-    return endpoint("HEAD", path, retry)
+    return endpoint("HEAD", path, retry, ratelimit)

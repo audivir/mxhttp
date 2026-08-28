@@ -143,6 +143,25 @@ class Shop(SyncConsumer):
     def create_item(self, item: Annotated[NewItem, Body]) -> Item: ...  # type: ignore[empty-body]
 ```
 
+### Rate limiting
+
+Configure a maximum call rate with `@ratelimit` on the class, so individual endpoints don't need to hand-roll their own throttling:
+
+```python
+from mxhttp import RateLimit, SyncConsumer, get, ratelimit
+
+
+@ratelimit(RateLimit(calls=5, period=1))
+class Shop(SyncConsumer):
+    @get("/items/{item_id}")
+    def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
+```
+
+- The limit is scoped to the `(host, port)` being called, shared across every consumer instance and every endpoint on that class, not counted per instance or per endpoint.
+- Unlike `@retry`, this applies to every endpoint kind, including streaming and SSE.
+- By default, a call over the limit blocks until the current window resets. Set `block=False` to raise `RateLimitExceededError` immediately instead, or `max_delay=` to raise instead of blocking past that many seconds.
+- Pass `ratelimit=` directly to `@get`/`@post`/etc. to override the class's `RateLimit` config for that one endpoint, or `ratelimit=None` to disable rate limiting for it, the same way `retry=` works.
+
 ### Streaming responses
 
 Annotate the return type as `Iterator[bytes]` (sync) or `AsyncIterator[bytes]` (async) to stream the response body in chunks.
