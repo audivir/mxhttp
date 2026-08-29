@@ -44,13 +44,13 @@ ProgressCallback: TypeAlias = "Callable[[int, int | None], None]"
 PartProgressCallback: TypeAlias = "Callable[[int, int, int], None]"
 
 
-def _notify(callback: ProgressCallback | None, received: int, total: int | None) -> None:
+def notify(callback: ProgressCallback | None, received: int, total: int | None) -> None:
     """Invokes the synchronous progress callback if provided."""
     if callback is not None:
         callback(received, total)
 
 
-def _notify_part(  # noqa: PLR0913, PLR0917
+def notify_part(  # noqa: PLR0913, PLR0917
     callback: ProgressCallback | None,
     part_callback: PartProgressCallback | None,
     part_idx: int,
@@ -355,7 +355,7 @@ class Downloader(msgspec.Struct, frozen=True):
                         if validator is None:
                             validator = write_state(state_path, self.spec.url, response)
                         total = extract_total_size(response, received)
-                        _notify(on_progress, received, total)
+                        notify(on_progress, received, total)
                         for chunk in response.iter_bytes():
                             fh.write(chunk)
                             if hasher is not None:
@@ -363,7 +363,7 @@ class Downloader(msgspec.Struct, frozen=True):
                             fh.flush()
                             os.fsync(fh.fileno())
                             received += len(chunk)
-                            _notify(on_progress, received, total)
+                            notify(on_progress, received, total)
                     break
                 except retryable_exceptions(self.retry.on) as e:
                     if not is_retryable_exception(e, self.retry):
@@ -478,7 +478,7 @@ class Downloader(msgspec.Struct, frozen=True):
             current_total = sum(received_per_part)
         for i, p_info in enumerate(parts_state):
             p_total = p_info.end - p_info.start + 1
-            _notify_part(
+            notify_part(
                 on_progress,
                 on_part_progress,
                 i,
@@ -522,7 +522,7 @@ class Downloader(msgspec.Struct, frozen=True):
                                     received_per_part[part_idx] = part_info.received
                                     current_total = sum(received_per_part)
                                 part_total = part_info.end - part_info.start + 1
-                                _notify_part(
+                                notify_part(
                                     on_progress,
                                     on_part_progress,
                                     part_idx,
@@ -678,13 +678,13 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                         if validator is None:
                             validator = await write_state_async(state_path, self.spec.url, response)
                         total = extract_total_size(response, received)
-                        _notify(on_progress, received, total)
+                        notify(on_progress, received, total)
                         async for chunk in response.aiter_bytes():
                             await fh.write(chunk)
                             if hasher is not None:
                                 hasher.update(chunk)
                             received += len(chunk)
-                            _notify(on_progress, received, total)
+                            notify(on_progress, received, total)
                     await fh.flush()
                     break
                 except retryable_exceptions(self.retry.on) as e:
@@ -804,7 +804,7 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
         current_total = sum(received_per_part)
         for i, p_info in enumerate(parts_state):
             p_total = p_info.end - p_info.start + 1
-            _notify_part(
+            notify_part(
                 on_progress,
                 on_part_progress,
                 i,
@@ -846,7 +846,7 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                                 received_per_part[part_idx] = part_info.received
                                 current_total = sum(received_per_part)
                                 part_total = part_info.end - part_info.start + 1
-                                _notify_part(
+                                notify_part(
                                     on_progress,
                                     on_part_progress,
                                     part_idx,

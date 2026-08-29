@@ -30,12 +30,12 @@ class TqdmProgress(msgspec.Struct):
 
     @property
     def progress_bar(self) -> tqdm | None:
-        """Returns the underlying tqdm instance if initialized."""
+        """Underlying tqdm instance, if initialized."""
         return self._pb
 
     @property
     def part_progress_bars(self) -> dict[int, tqdm]:
-        """Returns active per-part tqdm instances."""
+        """Active per-part tqdm instances."""
         return self._part_pbs
 
     def start(

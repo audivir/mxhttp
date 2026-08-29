@@ -21,11 +21,11 @@ if TYPE_CHECKING:
 
 
 class ConcurrencyExceededError(Exception):
-    """Raised when a non-blocking concurrency limit is exceeded."""
+    """A non-blocking concurrency limit was exceeded."""
 
 
 class ConcurrencyTimeoutError(Exception):
-    """Raised when waiting for a concurrency slot exceeds the timeout."""
+    """Waiting for a concurrency slot exceeded the timeout."""
 
 
 class Concurrency(msgspec.Struct, frozen=True):

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
     import anyio
 
-ChecksumAlgorithm = Literal["sha256", "sha512", "sha384", "sha224", "sha1", "md5"]
+ChecksumAlgorithm: TypeAlias = Literal["sha256", "sha512", "sha384", "sha224", "sha1", "md5"]
 
 SHA256_HEX_LEN: int = 64
 SHA512_HEX_LEN: int = 128
@@ -34,19 +34,19 @@ def is_checksum_algorithm(val: str) -> TypeGuard[ChecksumAlgorithm]:
 
 
 class DigestibleFile(Protocol):
-    """File protocol supporting readinto for zero-copy hashing."""
+    """Interface for file objects supporting readinto for zero-copy hashing."""
 
     def readinto(self, buffer: bytearray | memoryview, /) -> int:
         """Reads bytes directly into a buffer."""
         ...
 
     def readable(self, /) -> bool:
-        """Returns True if the file stream can be read."""
+        """Checks whether the file stream can be read."""
         ...
 
 
 class ChecksumMismatchError(Exception):
-    """Raised when downloaded data does not match the expected checksum."""
+    """Downloaded data does not match the expected checksum."""
 
     def __init__(self, algorithm: ChecksumAlgorithm, expected: str, actual: str) -> None:
         """Initializes checksum mismatch exception with algorithm details."""
