@@ -5,17 +5,19 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from collections.abc import Callable  # noqa: TC003
 from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias
 
-import anyio
 import msgspec
-from filelock import AsyncFileLock, FileLock, Timeout
 
-from mxhttp.ratelimit import gate_async, gate_sync
+from mxhttp.consumer import AsyncConsumer, SyncConsumer  # noqa: TC001
+from mxhttp.ratelimit import RateLimit, gate_async, gate_sync
+from mxhttp.request import RequestSpec  # noqa: TC001
 from mxhttp.response import ResumeLostError, apply_streaming_response_handler, resume_headers
 from mxhttp.retry import (
+    Retry,
     extract_response,
     is_retryable_exception,
     resolve_delay,
@@ -23,15 +25,9 @@ from mxhttp.retry import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
+    import anyio
     import httpx
     from _typeshed import StrPath
-
-    from mxhttp.consumer import AsyncConsumer, SyncConsumer
-    from mxhttp.ratelimit import RateLimit
-    from mxhttp.request import RequestSpec
-    from mxhttp.retry import Retry
 
 ProgressCallback: TypeAlias = "Callable[[int, int | None], None]"
 
@@ -161,6 +157,8 @@ class Downloader(msgspec.Struct, frozen=True):
                 `overwrite=True` to discard it and start over.
             ResumeLostError: If a reconnect gets a full response instead of a partial one.
         """
+        from filelock import FileLock, Timeout
+
         target = Path(path)
         part_path, state_path, lock_path = part_paths(target)
         try:
@@ -195,19 +193,19 @@ class Downloader(msgspec.Struct, frozen=True):
                                     received += len(chunk)
                                     _notify(on_progress, received, total)
                             break
-                        except retryable_exceptions(self.retry.on) as exc:
-                            if not is_retryable_exception(exc, self.retry):
+                        except retryable_exceptions(self.retry.on) as e:
+                            if not is_retryable_exception(e, self.retry):
                                 raise
                             attempt += 1
                             if attempt >= self.retry.attempts:
                                 raise
-                            time.sleep(resolve_delay(self.retry, attempt, extract_response(exc)))
+                            time.sleep(resolve_delay(self.retry, attempt, extract_response(e)))
 
                 part_path.replace(target)
                 state_path.unlink(missing_ok=True)
                 return target
-        except Timeout as exc:
-            raise DownloadLockError(f"Download to {target} is locked by another process") from exc
+        except Timeout as e:
+            raise DownloadLockError(f"Download to {target} is locked by another process") from e
 
 
 class AsyncDownloader(msgspec.Struct, frozen=True):
@@ -232,6 +230,9 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                 `overwrite=True` to discard it and start over.
             ResumeLostError: If a reconnect gets a full response instead of a partial one.
         """
+        import anyio
+        from filelock import AsyncFileLock, Timeout
+
         target = anyio.Path(path)
         part_path = target.with_name(target.name + ".part")
         state_path = target.with_name(target.name + ".part.json")
@@ -269,19 +270,19 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                                     _notify(on_progress, received, total)
                             await fh.flush()
                             break
-                        except retryable_exceptions(self.retry.on) as exc:
-                            if not is_retryable_exception(exc, self.retry):
+                        except retryable_exceptions(self.retry.on) as e:
+                            if not is_retryable_exception(e, self.retry):
                                 raise
                             attempt += 1
                             if attempt >= self.retry.attempts:
                                 raise
                             await fh.flush()
                             await asyncio.sleep(
-                                resolve_delay(self.retry, attempt, extract_response(exc))
+                                resolve_delay(self.retry, attempt, extract_response(e))
                             )
 
                 await part_path.replace(target)
                 await state_path.unlink(missing_ok=True)
                 return Path(path)
-        except Timeout as exc:
-            raise DownloadLockError(f"Download to {target} is locked by another process") from exc
+        except Timeout as e:
+            raise DownloadLockError(f"Download to {target} is locked by another process") from e

@@ -54,8 +54,9 @@ def split_path_template(path: str) -> ParsedPath:  # noqa: C901, PLR0912
         clean_parts.append(f"{marker}{len(names) - 1}_")
     split = urllib.parse.urlsplit("".join(clean_parts))
 
-    path_field_count = split.path.count(marker)
-    path_only = split.path
+    full_path = f"{split.scheme}://{split.netloc}{split.path}" if split.scheme else split.path
+    path_field_count = full_path.count(marker)
+    path_only = full_path
     path_field_names = set(names[:path_field_count])
     for index, name in enumerate(names[:path_field_count]):
         path_only = path_only.replace(f"{marker}{index}_", f"{{{name}}}")

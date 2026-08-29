@@ -10,7 +10,19 @@ import httpx  # noqa: TC002
 import msgspec
 from pydantic import BaseModel
 
-from mxhttp import AsyncConsumer, Body, RawPath, SyncConsumer, delete, get, head, patch, post, put
+from mxhttp import (
+    AsyncConsumer,
+    Body,
+    RawPath,
+    SyncConsumer,
+    base_url,
+    delete,
+    get,
+    head,
+    patch,
+    post,
+    put,
+)
 
 
 class Item(msgspec.Struct):
@@ -28,26 +40,31 @@ class NewItem(msgspec.Struct):
     price: float
 
 
+@base_url("https://api.example.com")
 class PathApi(SyncConsumer):
     @get("/users/{user_id}/posts/{post_id}")
     def get_post(self, user_id: str, post_id: int) -> Item: ...  # type: ignore[empty-body]
 
 
+@base_url("https://api.example.com")
 class AsyncPathApi(AsyncConsumer):
     @get("/users/{user_id}/posts/{post_id}")
     async def get_post(self, user_id: str, post_id: int) -> Item: ...  # type: ignore[empty-body]
 
 
+@base_url("https://api.example.com")
 class RawPathApi(SyncConsumer):
     @get("{raw}")
     def fetch(self, raw: Annotated[str, RawPath]) -> Item: ...  # type: ignore[empty-body]
 
 
+@base_url("https://api.example.com")
 class AsyncRawPathApi(AsyncConsumer):
     @get("{raw}")
     async def fetch(self, raw: Annotated[str, RawPath]) -> Item: ...  # type: ignore[empty-body]
 
 
+@base_url("https://api.example.com")
 class CrudApi(SyncConsumer):
     @get("/items/{item_id}")
     def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
@@ -68,6 +85,7 @@ class CrudApi(SyncConsumer):
     def head_item(self, item_id: int) -> httpx.Response: ...  # type: ignore[empty-body]
 
 
+@base_url("https://api.example.com")
 class AsyncCrudApi(AsyncConsumer):
     @get("/items/{item_id}")
     async def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
@@ -88,11 +106,13 @@ class AsyncCrudApi(AsyncConsumer):
     async def head_item(self, item_id: int) -> httpx.Response: ...  # type: ignore[empty-body]
 
 
+@base_url("https://api.example.com")
 class RawApi(SyncConsumer):
     @get("/ping")
     def ping(self) -> httpx.Response: ...  # type: ignore[empty-body]
 
 
+@base_url("https://api.example.com")
 class AsyncRawApi(AsyncConsumer):
     @get("/ping")
     async def ping(self) -> httpx.Response: ...  # type: ignore[empty-body]
@@ -116,6 +136,7 @@ class AttrsItem:
     id: int
 
 
+@base_url("https://api.example.com")
 class MoreApi(SyncConsumer):
     @get("/str")
     def get_string(self) -> str: ...  # type: ignore[empty-body]

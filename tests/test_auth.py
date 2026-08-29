@@ -15,24 +15,24 @@ pytestmark = pytest.mark.anyio
 
 
 def test_consumer_has_no_auth_by_default() -> None:
-    consumer = SyncConsumer("https://api.example.com")
+    consumer = SyncConsumer()
     assert consumer.session.auth is None
 
 
 def test_consumer_accepts_httpx_auth_instance() -> None:
     auth = httpx.BasicAuth("alice", "secret")
-    consumer = SyncConsumer("https://api.example.com", auth=auth)
+    consumer = SyncConsumer(auth=auth)
     assert consumer.session.auth is auth
 
 
 def test_consumer_accepts_tuple_auth_shorthand() -> None:
-    consumer = SyncConsumer("https://api.example.com", auth=("alice", "secret"))
+    consumer = SyncConsumer(auth=("alice", "secret"))
     assert isinstance(consumer.session.auth, httpx.BasicAuth)
 
 
 def test_async_consumer_accepts_httpx_auth_instance() -> None:
     auth = httpx.BasicAuth("alice", "secret")
-    consumer = AsyncConsumer("https://api.example.com", auth=auth)
+    consumer = AsyncConsumer(auth=auth)
     assert consumer.session.auth is auth
 
 

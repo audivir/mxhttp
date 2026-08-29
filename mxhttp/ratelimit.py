@@ -97,9 +97,9 @@ def ratelimit(config: RateLimit) -> Callable[[type[AnyC_T]], type[AnyC_T]]:
     return decorate
 
 
-def acquire_sync(config: RateLimit, base_url: str) -> None:
+def acquire_sync(config: RateLimit, base_url: str | None) -> None:
     """Blocks, or raises `RateLimitExceededError`, until a call slot for the host is free."""
-    host, port = host_port(base_url)
+    host, port = host_port(base_url or "")
     delay = wait_time(get_window(host, port, config), config)
     if delay <= 0:
         return
@@ -110,9 +110,9 @@ def acquire_sync(config: RateLimit, base_url: str) -> None:
     time.sleep(delay)
 
 
-async def acquire_async(config: RateLimit, base_url: str) -> None:
+async def acquire_async(config: RateLimit, base_url: str | None) -> None:
     """Blocks, or raises `RateLimitExceededError`, until a call slot for the host is free."""
-    host, port = host_port(base_url)
+    host, port = host_port(base_url or "")
     delay = wait_time(get_window(host, port, config), config)
     if delay <= 0:
         return

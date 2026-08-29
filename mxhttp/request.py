@@ -270,12 +270,20 @@ def build_plan(  # noqa: C901, PLR0912
     return plan, return_type
 
 
-def build_request(
+def join_url(base_url: str | None, path: str) -> str:
+    """Combines base URL and path into a fully qualified absolute URL."""
+    if path.startswith(("http://", "https://")) or not base_url:
+        return path
+    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+
+def build_request(  # noqa: PLR0913, PLR0917
     method: str,
     parsed: ParsedPath,
     plan: list[ParamPlan],
     values: Mapping[str, object],
     jar: Mapping[str, str] | None = None,
+    base_url: str | None = None,
 ) -> RequestSpec:
     """Builds a request spec from the parameter plan and provided values.
 
@@ -285,6 +293,7 @@ def build_request(
         plan: Parameter plan describing how to map values to the request.
         values: Mapping of parameter names to their values.
         jar: Snapshot of the current cookie jar.
+        base_url: Base URL to prefix relative request paths with.
     """
     path_args: dict[str, object] = {}
     raw_path_args: dict[str, object] = {}
@@ -317,12 +326,13 @@ def build_request(
         headers["cookie"] = "; ".join(
             f"{k}={urllib.parse.quote(v, safe='')}" for k, v in cookies.items()
         )
+    formatted_path = parsed.path_only.format(
+        **{k: urllib.parse.quote(scalar_str(v), safe="") for k, v in path_args.items()},
+        **{k: scalar_str(v) for k, v in raw_path_args.items()},
+    )
     return RequestSpec(
         method=method,
-        url=parsed.path_only.format(
-            **{k: urllib.parse.quote(scalar_str(v), safe="") for k, v in path_args.items()},
-            **{k: scalar_str(v) for k, v in raw_path_args.items()},
-        ),
+        url=join_url(base_url, formatted_path),
         params=params or None,
         headers=headers or None,
         data=fields or None,

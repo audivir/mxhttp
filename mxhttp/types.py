@@ -65,7 +65,7 @@ PartValue: TypeAlias = (
 )
 """A multipart file part: bare content, or a (filename, content, content-type, headers) tuple."""
 
-ParamValue = str | int | float | bool
+ParamValue: TypeAlias = str | int | float | bool
 """A scalar query, field, header, or cookie value accepted by `httpx`."""
 
 QueryValue: TypeAlias = "ParamValue | Sequence[ParamValue]"

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mxhttp.consumer import AsyncConsumer, SyncConsumer
+from mxhttp.consumer import AsyncConsumer, SyncConsumer, base_url
 from mxhttp.download import (
     AsyncDownloader,
     Downloader,
@@ -19,7 +19,7 @@ from mxhttp.retry import Retry, retry
 from mxhttp.sse import Event
 from mxhttp.types import PartValue
 
-__version__ = "1.5.7"
+__version__ = "1.6.0"
 
 __all__ = [
     "AsyncConsumer",
@@ -45,6 +45,7 @@ __all__ = [
     "ResumeLostError",
     "Retry",
     "SyncConsumer",
+    "base_url",
     "delete",
     "endpoint",
     "get",

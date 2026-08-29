@@ -30,7 +30,7 @@ def make_consumer(
     response: Callable[[httpx.Request], Parsed_T] | Parsed_T,
     *,
     status_code: int = 200,
-    base_url: str = "https://api.example.com",
+    base_url: str | None = None,
     auth: httpx.Auth | tuple[str, str] | None = None,
     track_requests: Literal[False] = False,
 ) -> AnyC_T: ...
@@ -40,7 +40,7 @@ def make_consumer(
     response: Callable[[httpx.Request], Parsed_T] | Parsed_T,
     *,
     status_code: int = 200,
-    base_url: str = "https://api.example.com",
+    base_url: str | None = None,
     auth: httpx.Auth | tuple[str, str] | None = None,
     track_requests: Literal[True] = ...,
 ) -> tuple[AnyC_T, list[httpx.Request]]: ...
@@ -49,7 +49,7 @@ def make_consumer(  # noqa: PLR0913
     response: Callable[[httpx.Request], Parsed_T] | Parsed_T,
     *,
     status_code: int = 200,
-    base_url: str = "https://api.example.com",
+    base_url: str | None = None,
     auth: httpx.Auth | tuple[str, str] | None = None,
     track_requests: bool = False,
 ) -> AnyC_T | tuple[AnyC_T, list[httpx.Request]]:
@@ -70,14 +70,16 @@ def make_consumer(  # noqa: PLR0913
         return http_response
 
     transport = httpx.MockTransport(handler)
-    consumer = cls(base_url, auth=auth)
+    consumer = cls(auth=auth)
+    if base_url is not None:
+        consumer._base_url = base_url
+    elif consumer.base_url is None:
+        consumer._base_url = "https://api.example.com"
 
     if issubclass(cls, SyncConsumer):
-        consumer._session = httpx.Client(base_url=consumer.base_url, transport=transport, auth=auth)
+        consumer._session = httpx.Client(transport=transport, auth=auth)
     elif issubclass(cls, AsyncConsumer):
-        consumer._session = httpx.AsyncClient(
-            base_url=consumer.base_url, transport=transport, auth=auth
-        )
+        consumer._session = httpx.AsyncClient(transport=transport, auth=auth)
     else:
         raise TypeError(f"Unsupported consumer class: {cls.__name__}")
     if track_requests:
@@ -103,9 +105,11 @@ def make_stateful_consumer(
         return step
 
     transport = httpx.MockTransport(handler)
-    consumer = cls("https://api.example.com")
+    consumer = cls()
+    if consumer.base_url is None:  # pragma: no branch
+        consumer._base_url = "https://api.example.com"
     if issubclass(cls, SyncConsumer):
-        consumer._session = httpx.Client(base_url=consumer.base_url, transport=transport)
+        consumer._session = httpx.Client(transport=transport)
     else:
-        consumer._session = httpx.AsyncClient(base_url=consumer.base_url, transport=transport)
+        consumer._session = httpx.AsyncClient(transport=transport)
     return consumer, lambda: calls

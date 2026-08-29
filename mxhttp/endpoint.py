@@ -16,6 +16,7 @@ from typing import (
     overload,
 )
 
+from mxhttp.consumer import validate_scheme
 from mxhttp.download import AsyncDownloader, Downloader
 from mxhttp.parse import split_path_template
 from mxhttp.ratelimit import gate_async, gate_sync
@@ -130,12 +131,13 @@ def validate_endpoint_kinds(  # noqa: PLR0913
             raise TypeError("a sync method must return Downloader, not AsyncDownloader")
 
 
-def endpoint(  # noqa: C901, PLR0915
+def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
     method: Method_T,
     path: str,
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
     resumable: Retry | None = None,
+    base_url: str | Missing = MISSING,
 ) -> EndpointDecorator:
     """Shared implementation for the HTTP method decorator factories.
 
@@ -149,9 +151,15 @@ def endpoint(  # noqa: C901, PLR0915
         resumable: Reconnects with `Range` (using this `Retry` for reconnect attempts and
             backoff) if the connection drops mid-stream. Only valid for `GET` endpoints
             returning `Iterator[bytes]`/`AsyncIterator[bytes]`/`Downloader`/`AsyncDownloader`.
-            For `Downloader`/`AsyncDownloader`, defaults to `Retry()` rather than disabling
+        For `Downloader`/`AsyncDownloader`, defaults to `Retry()` rather than disabling
             reconnects, since resumability is the entire point of that return type.
+        base_url: Overrides the class-level base URL for this endpoint only.
     """
+    if path.startswith(("http://", "https://")):
+        if base_url is not MISSING:
+            raise ValueError("Cannot specify base_url when path is already an absolute URL")
+    elif base_url is not MISSING:
+        validate_scheme(base_url)
 
     def decorate(  # noqa: C901, PLR0911, PLR0915
         func: Callable[Concatenate[AnyC_T, P], Parsed_T]
@@ -182,12 +190,24 @@ def endpoint(  # noqa: C901, PLR0915
             is_coroutine=is_coroutine,
         )
 
+        def resolve_base_url(self: BaseConsumer) -> str | None:
+            """Resolves the endpoint base URL override, falling back to the consumer base URL."""
+            resolved = self._base_url if base_url is MISSING else base_url
+            if resolved is None and not path.startswith(("http://", "https://")):
+                raise ValueError(
+                    f"Cannot call relative endpoint {path!r} without a base_url configured "
+                    f"on {type(self).__name__} or @{method.lower()}()"
+                )
+            return resolved
+
         def resolve_spec(self: BaseConsumer, *args: P.args, **kwargs: P.kwargs) -> RequestSpec:
             """Binds call arguments against the stub signature and builds the request spec."""
             bound = sig.bind(self, *args, **kwargs)
             bound.apply_defaults()
             jar = dict(self.session.cookies) if has_cookies else None
-            return build_request(method, parsed, plan, bound.arguments, jar=jar)
+            return build_request(
+                method, parsed, plan, bound.arguments, jar=jar, base_url=resolve_base_url(self)
+            )
 
         def resolve_retry(self: BaseConsumer) -> Retry | None:
             """Resolves the endpoint retry override, falling back to the consumer default."""
@@ -306,51 +326,57 @@ def get(
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
     resumable: Retry | None = None,
+    base_url: str | Missing = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `GET {path}`."""
-    return endpoint("GET", path, retry, ratelimit, resumable)
+    return endpoint("GET", path, retry, ratelimit, resumable, base_url)
 
 
 def post(
     path: str,
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
+    base_url: str | Missing = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `POST {path}`."""
-    return endpoint("POST", path, retry, ratelimit)
+    return endpoint("POST", path, retry, ratelimit, base_url=base_url)
 
 
 def put(
     path: str,
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
+    base_url: str | Missing = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `PUT {path}`."""
-    return endpoint("PUT", path, retry, ratelimit)
+    return endpoint("PUT", path, retry, ratelimit, base_url=base_url)
 
 
 def patch(
     path: str,
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
+    base_url: str | Missing = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `PATCH {path}`."""
-    return endpoint("PATCH", path, retry, ratelimit)
+    return endpoint("PATCH", path, retry, ratelimit, base_url=base_url)
 
 
 def delete(
     path: str,
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
+    base_url: str | Missing = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `DELETE {path}`."""
-    return endpoint("DELETE", path, retry, ratelimit)
+    return endpoint("DELETE", path, retry, ratelimit, base_url=base_url)
 
 
 def head(
     path: str,
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
+    base_url: str | Missing = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `HEAD {path}`."""
-    return endpoint("HEAD", path, retry, ratelimit)
+    return endpoint("HEAD", path, retry, ratelimit, base_url=base_url)
