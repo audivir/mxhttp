@@ -18,7 +18,7 @@ from typing import (
 
 from mxhttp.concurrency import Concurrency, gate_concurrency_async, gate_concurrency_sync
 from mxhttp.consumer import validate_scheme
-from mxhttp.download import AsyncDownloader, Downloader
+from mxhttp.download import AsyncDownloader, Downloader, Parts, resolve_parts
 from mxhttp.parse import split_path_template
 from mxhttp.ratelimit import gate_async, gate_sync
 from mxhttp.request import RequestSpec, build_plan, build_request
@@ -104,16 +104,17 @@ class EndpointDecorator(Protocol):
     ) -> Callable[Concatenate[AsyncC_T, P], Coroutine[Any, Any, AsyncDownloader]]: ...
 
 
-def validate_endpoint_kinds(  # noqa: PLR0913
+def validate_endpoint_kinds(  # noqa: C901, PLR0913
     method: Method_T,
     resumable: Retry | None,
+    parts: int | Parts | None,
     *,
     is_raw_stream: bool,
     is_downloader: bool,
     is_async_downloader: bool,
     is_coroutine: bool,
 ) -> None:
-    """Rejects `resumable`/`Downloader`/`AsyncDownloader` combinations that can never work."""
+    """Rejects invalid combinations of resumable, Downloader, AsyncDownloader, and parts."""
     if resumable is not None:
         if method != "GET":
             raise TypeError("resumable is only valid for GET endpoints")
@@ -122,6 +123,12 @@ def validate_endpoint_kinds(  # noqa: PLR0913
                 "resumable is only valid for Iterator[bytes]/AsyncIterator[bytes]/"
                 "Downloader/AsyncDownloader endpoints"
             )
+
+    if parts is not None:
+        if method != "GET":
+            raise TypeError("parts is only valid for GET endpoints")
+        if not (is_downloader or is_async_downloader):
+            raise TypeError("parts is only valid for Downloader/AsyncDownloader endpoints")
 
     if is_downloader or is_async_downloader:
         if method != "GET":
@@ -140,6 +147,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
     resumable: Retry | None = None,
     base_url: str | Missing = MISSING,
     concurrency: int | Concurrency | Missing | None = MISSING,
+    parts: int | Parts | None = None,
 ) -> EndpointDecorator:
     """Shared implementation for the HTTP method decorator factories.
 
@@ -158,6 +166,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
         base_url: Overrides the class-level base URL for this endpoint only.
         concurrency: Overrides the class-level `Concurrency` config for this endpoint only.
             Pass `None` explicitly to disable concurrency limits for this endpoint only.
+        parts: Configures multi-part parallel segmented download for `Downloader`/`AsyncDownloader`.
     """
     if path.startswith(("http://", "https://")):
         if base_url is not MISSING:
@@ -188,6 +197,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
         validate_endpoint_kinds(
             method,
             resumable,
+            parts,
             is_raw_stream=is_raw_stream,
             is_downloader=is_downloader,
             is_async_downloader=is_async_downloader,
@@ -243,6 +253,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
                         resumable or Retry(),
                         resolve_ratelimit(self),
                         resolve_concurrency(self),
+                        resolve_parts(parts),
                     )
 
                 return async_downloader_wrapper  # type: ignore[return-value]
@@ -300,6 +311,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
                     resumable or Retry(),
                     resolve_ratelimit(self),
                     resolve_concurrency(self),
+                    resolve_parts(parts),
                 )
 
             return downloader_wrapper  # type: ignore[return-value]
@@ -354,9 +366,10 @@ def get(  # noqa: PLR0913,PLR0917
     resumable: Retry | None = None,
     base_url: str | Missing = MISSING,
     concurrency: int | Concurrency | Missing | None = MISSING,
+    parts: int | Parts | None = None,
 ) -> EndpointDecorator:
     """Declares a stub method as `GET {path}`."""
-    return endpoint("GET", path, retry, ratelimit, resumable, base_url, concurrency)
+    return endpoint("GET", path, retry, ratelimit, resumable, base_url, concurrency, parts)
 
 
 def post(

@@ -21,6 +21,7 @@ from mxhttp import (
     DownloadIdentityError,
     DownloadLockError,
     DownloadState,
+    Parts,
     RateLimit,
     RateLimitExceededError,
     ResumeLostError,
@@ -28,7 +29,14 @@ from mxhttp import (
     SyncConsumer,
     get,
 )
-from mxhttp.download import extract_total_size, part_paths
+from mxhttp.download import (
+    MultiPartState,
+    PartState,
+    compute_ranges,
+    extract_total_size,
+    part_paths,
+    resolve_parts,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -92,6 +100,22 @@ class RateLimitedDownloadApi(SyncConsumer):
 class AsyncRateLimitedDownloadApi(AsyncConsumer):
     @get("/files/{file_id}", ratelimit=RateLimit(calls=1, period=60, block=False))
     async def download(self, file_id: int) -> AsyncDownloader: ...  # type: ignore[empty-body]
+
+
+class MultiPartDownloadApi(SyncConsumer):
+    @get("/files/{file_id}", parts=Parts(count=2, min_part_size=10))
+    def download(self, file_id: int) -> Downloader: ...  # type: ignore[empty-body]
+
+    @get("/files/{file_id}", parts=2)
+    def download_int_parts(self, file_id: int) -> Downloader: ...  # type: ignore[empty-body]
+
+
+class AsyncMultiPartDownloadApi(AsyncConsumer):
+    @get("/files/{file_id}", parts=Parts(count=2, min_part_size=10))
+    async def download(self, file_id: int) -> AsyncDownloader: ...  # type: ignore[empty-body]
+
+    @get("/files/{file_id}", parts=2)
+    async def download_int_parts(self, file_id: int) -> AsyncDownloader: ...  # type: ignore[empty-body]
 
 
 def test_download_rejects_non_get_methods() -> None:
@@ -548,3 +572,528 @@ async def test_download_unretryable_status_code_raises_immediately(
             sync_dl(target)
 
     assert calls == 1
+
+
+def test_parts_struct_validation() -> None:
+    p = Parts()
+    assert p.count == 4
+    assert p.min_part_size == 5 * 1024 * 1024
+    assert p.max_parts == 16
+
+    with pytest.raises(ValueError, match="count must be >= 1"):
+        Parts(count=0)
+
+    with pytest.raises(ValueError, match="min_part_size must be >= 1"):
+        Parts(min_part_size=0)
+
+    with pytest.raises(ValueError, match="max_parts must be >= count"):
+        Parts(count=10, max_parts=5)
+
+
+def test_parts_resolve_count() -> None:
+    p = Parts(count=4, min_part_size=1000, max_parts=10)
+    assert p.resolve_count(500) == 1
+    assert p.resolve_count(1000) == 1
+    assert p.resolve_count(2500) == 2
+    assert p.resolve_count(4000) == 4
+    assert p.resolve_count(10000) == 4
+
+    p2 = Parts(count=8, min_part_size=1000, max_parts=8)
+    assert p2.resolve_count(50000) == 8
+
+
+def test_resolve_parts_helper() -> None:
+    assert resolve_parts(None) is None
+    p = resolve_parts(4)
+    assert isinstance(p, Parts)
+    assert p.count == 4
+    assert resolve_parts(p) is p
+
+
+def test_compute_ranges() -> None:
+    assert compute_ranges(100, 1) == [(0, 99)]
+    assert compute_ranges(100, 0) == [(0, 99)]
+    assert compute_ranges(1000, 4) == [(0, 249), (250, 499), (500, 749), (750, 999)]
+    assert compute_ranges(10, 3) == [(0, 2), (3, 5), (6, 9)]
+
+
+def test_endpoint_parts_validation() -> None:
+    from mxhttp import endpoint
+
+    with pytest.raises(TypeError, match="parts is only valid for GET endpoints"):
+
+        class _PostPartsApi(SyncConsumer):
+            @endpoint("POST", "/files", parts=2)
+            def create(self) -> Downloader: ...  # type: ignore[empty-body]
+
+    with pytest.raises(
+        TypeError, match="parts is only valid for Downloader/AsyncDownloader endpoints"
+    ):
+
+        class _GetNonDownloaderApi(SyncConsumer):
+            @get("/files", parts=2)  # type: ignore[type-var]
+            def get_files(self) -> int: ...  # type: ignore[empty-body]
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_success(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    events: list[tuple[int, int | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/20", "ETag": '"v1"'},
+                content=b"0",
+            )
+        if range_header == "bytes=0-9":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-9/20", "ETag": '"v1"'},
+                content=b"0123456789",
+            )
+        assert range_header == "bytes=10-19"
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 10-19/20", "ETag": '"v1"'},
+            content=b"abcdefghij",
+        )
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "result.bin"
+
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        res = await async_dl(target, on_progress=lambda r, t: events.append((r, t)))
+    else:
+        sync_dl = consumer.download(file_id=1)
+        res = sync_dl(target, on_progress=lambda r, t: events.append((r, t)))
+
+    assert res == target
+    assert target.read_bytes() == b"0123456789abcdefghij"
+    assert not (tmp_path / "result.bin.part.0").exists()
+    assert not (tmp_path / "result.bin.part.1").exists()
+    assert not (tmp_path / "result.bin.part.json").exists()
+    assert events[-1] == (20, 20)
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_fallback_when_probe_returns_200(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    def handler(unused_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"full non-range response")
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "fallback.bin"
+
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        await async_dl(target)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        sync_dl(target)
+
+    assert target.read_bytes() == b"full non-range response"
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_fallback_when_size_below_min(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/5", "ETag": '"v1"'},
+                content=b"h",
+            )
+        return httpx.Response(200, content=b"hello")
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "small.bin"
+
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        await async_dl(target)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        sync_dl(target)
+
+    assert target.read_bytes() == b"hello"
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_resumes_existing_parts(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    target = tmp_path / "resume_parts.bin"
+    seg0 = tmp_path / "resume_parts.bin.part.0"
+    seg1 = tmp_path / "resume_parts.bin.part.1"
+    state_file = tmp_path / "resume_parts.bin.part.json"
+
+    seg0.write_bytes(b"0123456789")
+    seg1.write_bytes(b"abc")
+
+    url = "https://api.example.com/files/1"
+    state = MultiPartState(
+        url=url,
+        etag='"v1"',
+        last_modified=None,
+        total_size=20,
+        parts=[
+            PartState(index=0, start=0, end=9, received=10),
+            PartState(index=1, start=10, end=19, received=3),
+        ],
+    )
+    state_file.write_bytes(msgspec.json.encode(state))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        assert range_header == "bytes=13-19"
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 13-19/20", "ETag": '"v1"'},
+            content=b"defghij",
+        )
+
+    consumer = make_consumer(cls, handler)
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        await async_dl(target)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        sync_dl(target)
+
+    assert target.read_bytes() == b"0123456789abcdefghij"
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_overwrite(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    target = tmp_path / "overwrite.bin"
+    seg0 = tmp_path / "overwrite.bin.part.0"
+    state_file = tmp_path / "overwrite.bin.part.json"
+
+    seg0.write_bytes(b"corrupt")
+    state_file.write_bytes(b"{}")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/20", "ETag": '"v1"'},
+                content=b"0",
+            )
+        if range_header == "bytes=0-9":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-9/20", "ETag": '"v1"'},
+                content=b"0123456789",
+            )
+        assert range_header == "bytes=10-19"
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 10-19/20", "ETag": '"v1"'},
+            content=b"abcdefghij",
+        )
+
+    consumer = make_consumer(cls, handler)
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        await async_dl(target, overwrite=True)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        sync_dl(target, overwrite=True)
+
+    assert target.read_bytes() == b"0123456789abcdefghij"
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_identity_error(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    target = tmp_path / "ident.bin"
+    state_file = tmp_path / "ident.bin.part.json"
+
+    state = MultiPartState(
+        url="https://api.example.com/different/resource",
+        etag='"v1"',
+        last_modified=None,
+        total_size=20,
+        parts=[PartState(0, 0, 9, 0), PartState(1, 10, 19, 0)],
+    )
+    state_file.write_bytes(msgspec.json.encode(state))
+
+    consumer = make_consumer(cls, lambda _: httpx.Response(200))
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        with pytest.raises(DownloadIdentityError):
+            await async_dl(target)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        with pytest.raises(DownloadIdentityError):
+            sync_dl(target)
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_resume_lost_error_when_server_returns_200(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    target = tmp_path / "resume_lost.bin"
+    seg0 = tmp_path / "resume_lost.bin.part.0"
+    state_file = tmp_path / "resume_lost.bin.part.json"
+
+    seg0.write_bytes(b"01234")
+    state = MultiPartState(
+        url="https://api.example.com/files/1",
+        etag='"v1"',
+        last_modified=None,
+        total_size=20,
+        parts=[PartState(0, 0, 9, 5), PartState(1, 10, 19, 0)],
+    )
+    state_file.write_bytes(msgspec.json.encode(state))
+
+    def handler(unused_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"full content changed")
+
+    consumer = make_consumer(cls, handler)
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        with pytest.raises(
+            Exception, match=r"ResumeLostError|server ignored Range|unhandled errors in a TaskGroup"
+        ):
+            await async_dl(target)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        with pytest.raises(ResumeLostError):
+            sync_dl(target)
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_corrupted_state_restarts(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    target = tmp_path / "corrupt_state.bin"
+    state_file = tmp_path / "corrupt_state.bin.part.json"
+    state_file.write_bytes(b"invalid-json")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/20", "ETag": '"v1"'},
+                content=b"0",
+            )
+        if range_header == "bytes=0-9":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-9/20", "ETag": '"v1"'},
+                content=b"0123456789",
+            )
+        assert range_header == "bytes=10-19"
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 10-19/20", "ETag": '"v1"'},
+            content=b"abcdefghij",
+        )
+
+    consumer = make_consumer(cls, handler)
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        await async_dl(target)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        sync_dl(target)
+
+    assert target.read_bytes() == b"0123456789abcdefghij"
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_retries_transient_error(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    part1_attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal part1_attempts
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/20", "ETag": '"v1"'},
+                content=b"0",
+            )
+        if range_header == "bytes=0-9":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-9/20", "ETag": '"v1"'},
+                content=b"0123456789",
+            )
+        assert range_header == "bytes=10-19"
+        part1_attempts += 1
+        if part1_attempts == 1:
+            return httpx.Response(503, headers={"Retry-After": "0"})
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 10-19/20", "ETag": '"v1"'},
+            content=b"abcdefghij",
+        )
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "retry_part.bin"
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        await async_dl(target)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        sync_dl(target)
+
+    assert target.read_bytes() == b"0123456789abcdefghij"
+    assert part1_attempts == 2
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_exceeds_retry_attempts(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/20", "ETag": '"v1"'},
+                content=b"0",
+            )
+        if range_header == "bytes=0-9":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-9/20", "ETag": '"v1"'},
+                content=b"0123456789",
+            )
+        assert range_header == "bytes=10-19"
+        return httpx.Response(503, headers={"Retry-After": "0"})
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "exceed_retry.bin"
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        with pytest.raises(Exception, match=r"503|HTTPStatusError|TaskGroup"):
+            await async_dl(target)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        with pytest.raises(httpx.HTTPStatusError):
+            sync_dl(target)
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_unretryable_part_error(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/20", "ETag": '"v1"'},
+                content=b"0",
+            )
+        return httpx.Response(404)
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "unretryable_part.bin"
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        with pytest.raises(Exception, match=r"404|HTTPStatusError|TaskGroup"):
+            await async_dl(target)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        with pytest.raises(httpx.HTTPStatusError):
+            sync_dl(target)
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_call_time_override(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/30", "ETag": '"v1"'},
+                content=b"0",
+            )
+        if range_header == "bytes=0-9":
+            return httpx.Response(206, content=b"0123456789")
+        if range_header == "bytes=10-19":
+            return httpx.Response(206, content=b"abcdefghij")
+        assert range_header == "bytes=20-29"
+        return httpx.Response(206, content=b"KLMNOPQRST")
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "override_parts.bin"
+
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        await async_dl(target, parts=Parts(count=3, min_part_size=10))
+    else:
+        sync_dl = consumer.download(file_id=1)
+        sync_dl(target, parts=Parts(count=3, min_part_size=10))
+
+    assert target.read_bytes() == b"0123456789abcdefghijKLMNOPQRST"
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_int_parts(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        assert range_header == "bytes=0-0"
+        return httpx.Response(200, content=b"hello")
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "int_parts.bin"
+
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download_int_parts(file_id=1)
+        await async_dl(target)
+    else:
+        sync_dl = consumer.download_int_parts(file_id=1)
+        sync_dl(target)
+
+    assert target.read_bytes() == b"hello"

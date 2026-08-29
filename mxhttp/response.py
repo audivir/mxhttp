@@ -219,13 +219,13 @@ def resumable_stream_sync(
                         received += len(chunk)
                         yield chunk
                     return
-            except retryable_exceptions(config.on) as exc:
-                if not is_retryable_exception(exc, config):
+            except retryable_exceptions(config.on) as e:
+                if not is_retryable_exception(e, config):
                     raise
                 attempt += 1
                 if attempt >= config.attempts:
                     raise
-                time.sleep(resolve_delay(config, attempt, extract_response(exc)))
+                time.sleep(resolve_delay(config, attempt, extract_response(e)))
 
 
 async def resumable_stream_async(
@@ -264,13 +264,13 @@ async def resumable_stream_async(
                         received += len(chunk)
                         yield chunk
                     return
-            except retryable_exceptions(config.on) as exc:
-                if not is_retryable_exception(exc, config):
+            except retryable_exceptions(config.on) as e:
+                if not is_retryable_exception(e, config):
                     raise
                 attempt += 1
                 if attempt >= config.attempts:
                     raise
-                await asyncio.sleep(resolve_delay(config, attempt, extract_response(exc)))
+                await asyncio.sleep(resolve_delay(config, attempt, extract_response(e)))
 
 
 def sse_sync(

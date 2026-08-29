@@ -15,6 +15,7 @@ from mxhttp.download import (
     DownloadIdentityError,
     DownloadLockError,
     DownloadState,
+    Parts,
     ProgressCallback,
 )
 from mxhttp.endpoint import delete, endpoint, get, head, patch, post, put
@@ -26,7 +27,7 @@ from mxhttp.retry import Retry, retry
 from mxhttp.sse import Event
 from mxhttp.types import PartValue
 
-__version__ = "1.6.1"
+__version__ = "1.6.2"
 
 __all__ = [
     "AsyncConsumer",
@@ -45,6 +46,7 @@ __all__ = [
     "Header",
     "Part",
     "PartValue",
+    "Parts",
     "Path",
     "ProgressCallback",
     "Query",

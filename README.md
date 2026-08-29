@@ -288,6 +288,33 @@ path = shop_files.download(file_id=7)("/tmp/report.pdf")
 - Calling the `Downloader` again for the same `path` resumes from `{path}.part` if its sidecar identity matches the current request. A mismatch raises `DownloadIdentityError` rather than silently appending to or discarding data. Pass `overwrite=True` to discard existing data and start over.
 - Pass `on_progress=` to receive progress updates `(received_bytes, total_bytes_or_None)` as chunks arrive, or pass `TqdmProgress(desc="Downloading file")` for built-in terminal progress bars.
 
+#### Multi-part parallel downloads
+
+Configure multi-part segmented downloading for `Downloader` or `AsyncDownloader` endpoints via `parts=`:
+
+```python
+from mxhttp import Downloader, Parts, SyncConsumer, TqdmProgress, get
+
+
+class Files(SyncConsumer):
+    @get("/large-files/{file_id}", parts=Parts(count=4, min_part_size=10 * 1024 * 1024))
+    def download(self, file_id: int) -> Downloader: ...  # type: ignore[empty-body]
+
+
+downloader = files.download(file_id=42)
+path = downloader(
+    "/tmp/dataset.tar.gz",
+    on_progress=TqdmProgress(desc="Downloading dataset"),
+)
+```
+
+- `@get(..., parts=4)` accepts an integer shorthand for `Parts(count=4)`.
+- Multi-part probing queries the server with a range request `Range: bytes=0-0`. If the server returns partial content (`206`), parallel workers download disjoint segments simultaneously (`.part.0`, `.part.1`, ...).
+- If the server does not support byte ranges (returns `200`) or if file size is below `min_part_size`, `mxhttp` falls back cleanly to single-stream downloading without failing.
+- Segments are re-assembled into the destination file upon completion.
+- Each segment supports resumption independently. Interrupted downloads resume remaining bytes for incomplete parts from disk.
+- Pass `parts=` on the downloader call `downloader(path, parts=8)` to override endpoint defaults at runtime.
+
 ### Server-Sent Events
 
 Annotate the return type as `Iterator[Event]` (sync) or `AsyncIterator[Event]` (async) to parse the response as a Server-Sent Events stream instead of raw bytes:

@@ -133,19 +133,19 @@ class AsyncConcurrencyContext:
         if not self.config.block:
             try:
                 self.sem.acquire_nowait()
-            except anyio.WouldBlock as err:
+            except anyio.WouldBlock as e:
                 raise ConcurrencyExceededError(
                     f"concurrency limit of {self.config.limit} reached"
-                ) from err
+                ) from e
             return
         if self.config.timeout is not None:
             try:
                 with anyio.fail_after(self.config.timeout):
                     await self.sem.acquire()
-            except TimeoutError as err:
+            except TimeoutError as e:
                 raise ConcurrencyTimeoutError(
                     f"timed out waiting for concurrency slot after {self.config.timeout}s"
-                ) from err
+                ) from e
             return
         await self.sem.acquire()
 

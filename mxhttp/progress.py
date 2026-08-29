@@ -35,10 +35,10 @@ class TqdmProgress(msgspec.Struct):
         """Initializes and returns the tqdm progress instance."""
         try:
             from tqdm import tqdm
-        except ImportError as err:
+        except ImportError as e:
             raise ImportError(
                 "tqdm is required to use TqdmProgress. Install it via pip install tqdm."
-            ) from err
+            ) from e
 
         return tqdm(
             total=total,
