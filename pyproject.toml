@@ -29,11 +29,17 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
   "Typing :: Typed",
 ]
-dependencies = ["anyio", "filelock", "httpx", "msgspec", "typing-extensions"]
+dependencies = [
+  "anyio",
+  "filelock",
+  "httpx",
+  "msgspec",
+  "tqdm",
+  "typing-extensions",
+]
 
 [project.optional-dependencies]
 pydantic = ["pydantic"]
-tqdm = ["tqdm"]
 
 [project.urls]
 Homepage = "https://github.com/audivir/mxhttp"

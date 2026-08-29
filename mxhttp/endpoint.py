@@ -16,6 +16,7 @@ from typing import (
     overload,
 )
 
+from mxhttp.checksum import ChecksumInput, resolve_checksum
 from mxhttp.concurrency import Concurrency, gate_concurrency_async, gate_concurrency_sync
 from mxhttp.consumer import validate_scheme
 from mxhttp.download import AsyncDownloader, Downloader, Parts, resolve_parts
@@ -104,17 +105,18 @@ class EndpointDecorator(Protocol):
     ) -> Callable[Concatenate[AsyncC_T, P], Coroutine[Any, Any, AsyncDownloader]]: ...
 
 
-def validate_endpoint_kinds(  # noqa: C901, PLR0913
+def validate_endpoint_kinds(  # noqa: C901, PLR0912, PLR0913
     method: Method_T,
     resumable: Retry | None,
     parts: int | Parts | None,
+    checksum: ChecksumInput = None,
     *,
     is_raw_stream: bool,
     is_downloader: bool,
     is_async_downloader: bool,
     is_coroutine: bool,
 ) -> None:
-    """Rejects invalid combinations of resumable, Downloader, AsyncDownloader, and parts."""
+    """Rejects invalid combinations of resumable, Downloader, parts, and checksum."""
     if resumable is not None:
         if method != "GET":
             raise TypeError("resumable is only valid for GET endpoints")
@@ -129,6 +131,12 @@ def validate_endpoint_kinds(  # noqa: C901, PLR0913
             raise TypeError("parts is only valid for GET endpoints")
         if not (is_downloader or is_async_downloader):
             raise TypeError("parts is only valid for Downloader/AsyncDownloader endpoints")
+
+    if checksum is not None:
+        if method != "GET":
+            raise TypeError("checksum is only valid for GET endpoints")
+        if not (is_downloader or is_async_downloader):
+            raise TypeError("checksum is only valid for Downloader/AsyncDownloader endpoints")
 
     if is_downloader or is_async_downloader:
         if method != "GET":
@@ -148,6 +156,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
     base_url: str | Missing = MISSING,
     concurrency: int | Concurrency | Missing | None = MISSING,
     parts: int | Parts | None = None,
+    checksum: ChecksumInput = None,
 ) -> EndpointDecorator:
     """Shared implementation for the HTTP method decorator factories.
 
@@ -167,6 +176,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
         concurrency: Overrides the class-level `Concurrency` config for this endpoint only.
             Pass `None` explicitly to disable concurrency limits for this endpoint only.
         parts: Configures multi-part parallel segmented download for `Downloader`/`AsyncDownloader`.
+        checksum: Configures checksum validation for `Downloader`/`AsyncDownloader`.
     """
     if path.startswith(("http://", "https://")):
         if base_url is not MISSING:
@@ -198,6 +208,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
             method,
             resumable,
             parts,
+            checksum,
             is_raw_stream=is_raw_stream,
             is_downloader=is_downloader,
             is_async_downloader=is_async_downloader,
@@ -254,6 +265,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
                         resolve_ratelimit(self),
                         resolve_concurrency(self),
                         resolve_parts(parts),
+                        resolve_checksum(checksum),
                     )
 
                 return async_downloader_wrapper  # type: ignore[return-value]
@@ -312,6 +324,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
                     resolve_ratelimit(self),
                     resolve_concurrency(self),
                     resolve_parts(parts),
+                    resolve_checksum(checksum),
                 )
 
             return downloader_wrapper  # type: ignore[return-value]
@@ -367,9 +380,12 @@ def get(  # noqa: PLR0913,PLR0917
     base_url: str | Missing = MISSING,
     concurrency: int | Concurrency | Missing | None = MISSING,
     parts: int | Parts | None = None,
+    checksum: ChecksumInput = None,
 ) -> EndpointDecorator:
     """Declares a stub method as `GET {path}`."""
-    return endpoint("GET", path, retry, ratelimit, resumable, base_url, concurrency, parts)
+    return endpoint(
+        "GET", path, retry, ratelimit, resumable, base_url, concurrency, parts, checksum
+    )
 
 
 def post(

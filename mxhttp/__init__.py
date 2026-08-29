@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+from mxhttp.checksum import (
+    KNOWN_ALGORITHMS,
+    Checksum,
+    ChecksumCallback,
+    ChecksumInput,
+    ChecksumMismatchError,
+)
 from mxhttp.concurrency import (
     Concurrency,
     ConcurrencyExceededError,
@@ -15,6 +22,7 @@ from mxhttp.download import (
     DownloadIdentityError,
     DownloadLockError,
     DownloadState,
+    PartProgressCallback,
     Parts,
     ProgressCallback,
 )
@@ -27,12 +35,17 @@ from mxhttp.retry import Retry, retry
 from mxhttp.sse import Event
 from mxhttp.types import PartValue
 
-__version__ = "1.6.2"
+__version__ = "1.6.3"
 
 __all__ = [
+    "KNOWN_ALGORITHMS",
     "AsyncConsumer",
     "AsyncDownloader",
     "Body",
+    "Checksum",
+    "ChecksumCallback",
+    "ChecksumInput",
+    "ChecksumMismatchError",
     "Concurrency",
     "ConcurrencyExceededError",
     "ConcurrencyTimeoutError",
@@ -45,6 +58,7 @@ __all__ = [
     "Field",
     "Header",
     "Part",
+    "PartProgressCallback",
     "PartValue",
     "Parts",
     "Path",

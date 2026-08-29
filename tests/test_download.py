@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import io
 import time
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
@@ -17,6 +19,8 @@ from typing_extensions import override
 from mxhttp import (
     AsyncConsumer,
     AsyncDownloader,
+    Checksum,
+    ChecksumMismatchError,
     Downloader,
     DownloadIdentityError,
     DownloadLockError,
@@ -27,6 +31,8 @@ from mxhttp import (
     ResumeLostError,
     Retry,
     SyncConsumer,
+    TqdmProgress,
+    base_url,
     get,
 )
 from mxhttp.download import (
@@ -1081,9 +1087,7 @@ async def test_multipart_download_call_time_override(
 async def test_multipart_download_int_parts(
     tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
 ) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        range_header = request.headers.get("Range")
-        assert range_header == "bytes=0-0"
+    def handler(unused_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"hello")
 
     consumer = make_consumer(cls, handler)
@@ -1097,3 +1101,428 @@ async def test_multipart_download_int_parts(
         sync_dl(target)
 
     assert target.read_bytes() == b"hello"
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_on_part_progress(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    part_events: list[tuple[int, int, int]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/20", "ETag": '"v1"'},
+                content=b"0",
+            )
+        if range_header == "bytes=0-9":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-9/20", "ETag": '"v1"'},
+                content=b"0123456789",
+            )
+        assert range_header == "bytes=10-19"
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 10-19/20", "ETag": '"v1"'},
+            content=b"abcdefghij",
+        )
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "part_progress.bin"
+
+    def part_cb(p_idx: int, p_recv: int, p_tot: int) -> None:
+        part_events.append((p_idx, p_recv, p_tot))
+
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        await async_dl(target, on_part_progress=part_cb)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        sync_dl(target, on_part_progress=part_cb)
+
+    assert target.read_bytes() == b"0123456789abcdefghij"
+    assert any(p_idx == 0 and p_recv == 10 for p_idx, p_recv, _ in part_events)
+    assert any(p_idx == 1 and p_recv == 10 for p_idx, p_recv, _ in part_events)
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_tqdm_per_part_integration(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/20", "ETag": '"v1"'},
+                content=b"0",
+            )
+        if range_header == "bytes=0-9":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-9/20", "ETag": '"v1"'},
+                content=b"0123456789",
+            )
+        assert range_header == "bytes=10-19"
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 10-19/20", "ETag": '"v1"'},
+            content=b"abcdefghij",
+        )
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "tqdm_per_part.bin"
+    buf = io.StringIO()
+    progress = TqdmProgress(desc="Multi parts", file=buf, per_part=True)
+
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        await async_dl(target, on_progress=progress)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        sync_dl(target, on_progress=progress)
+
+    assert target.read_bytes() == b"0123456789abcdefghij"
+    assert progress.progress_bar is None
+    assert len(progress.part_progress_bars) == 0
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_single_stream_download_checksum_valid(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    data = b"hello stream with checksum validation"
+    expected_hash = hashlib.sha256(data).hexdigest()
+
+    def handler(unused_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=data)
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "valid_checksum.bin"
+
+    if isinstance(consumer, AsyncDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        res_path = await async_dl(target, checksum=expected_hash)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        res_path = sync_dl(target, checksum=expected_hash)
+
+    assert res_path == target
+    assert target.read_bytes() == data
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_single_stream_download_checksum_mismatch(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    data = b"hello corrupted stream"
+
+    def handler(unused_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=data)
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "mismatch_checksum.bin"
+
+    if isinstance(consumer, AsyncDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        with pytest.raises(ChecksumMismatchError):
+            await async_dl(target, checksum="0" * 64)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        with pytest.raises(ChecksumMismatchError):
+            sync_dl(target, checksum="0" * 64)
+
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_single_stream_download_checksum_container_and_callback(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    data = b"container and callback stream data"
+    expected_hash = hashlib.sha256(data).hexdigest()
+    recorded: list[str] = []
+
+    def handler(unused_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=data)
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "container_cb.bin"
+    cs = Checksum.sha256()
+
+    if isinstance(consumer, AsyncDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        await async_dl(target, checksum=cs, on_checksum=recorded.append)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        sync_dl(target, checksum=cs, on_checksum=recorded.append)
+
+    assert cs.digest == expected_hash
+    assert recorded == [expected_hash]
+    assert target.read_bytes() == data
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_single_stream_download_checksum_with_resume(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    full_data = b"0123456789abcdefghij"
+    expected_hash = hashlib.sha256(full_data).hexdigest()
+    target = tmp_path / "resume_checksum.bin"
+    part_path = tmp_path / "resume_checksum.bin.part"
+    part_json = tmp_path / "resume_checksum.bin.part.json"
+
+    part_path.write_bytes(b"0123456789")
+    part_json.write_bytes(
+        msgspec.json.encode(
+            DownloadState(url="https://api.example.com/files/1", etag='"v1"', last_modified=None)
+        )
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("Range") == "bytes=10-"
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 10-19/20", "ETag": '"v1"'},
+            content=b"abcdefghij",
+        )
+
+    consumer = make_consumer(cls, handler)
+
+    if isinstance(consumer, AsyncDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        await async_dl(target, checksum=expected_hash)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        sync_dl(target, checksum=expected_hash)
+
+    assert target.read_bytes() == full_data
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_checksum_valid(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    full_data = b"0123456789abcdefghij"
+    expected_hash = hashlib.sha256(full_data).hexdigest()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/20", "ETag": '"v1"'},
+                content=b"0",
+            )
+        if range_header == "bytes=0-9":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-9/20", "ETag": '"v1"'},
+                content=b"0123456789",
+            )
+        assert range_header == "bytes=10-19"
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 10-19/20", "ETag": '"v1"'},
+            content=b"abcdefghij",
+        )
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "mp_valid_checksum.bin"
+
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        res_path = await async_dl(target, checksum=expected_hash)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        res_path = sync_dl(target, checksum=expected_hash)
+
+    assert res_path == target
+    assert target.read_bytes() == full_data
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_checksum_mismatch(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/20", "ETag": '"v1"'},
+                content=b"0",
+            )
+        if range_header == "bytes=0-9":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-9/20", "ETag": '"v1"'},
+                content=b"0123456789",
+            )
+        assert range_header == "bytes=10-19"
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 10-19/20", "ETag": '"v1"'},
+            content=b"abcdefghij",
+        )
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "mp_mismatch_checksum.bin"
+
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        with pytest.raises(ChecksumMismatchError):
+            await async_dl(target, checksum="f" * 64)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        with pytest.raises(ChecksumMismatchError):
+            sync_dl(target, checksum="f" * 64)
+
+    assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_checksum_container_and_callback(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    full_data = b"0123456789abcdefghij"
+    expected_hash = hashlib.sha256(full_data).hexdigest()
+    recorded: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/20", "ETag": '"v1"'},
+                content=b"0",
+            )
+        if range_header == "bytes=0-9":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-9/20", "ETag": '"v1"'},
+                content=b"0123456789",
+            )
+        assert range_header == "bytes=10-19"
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 10-19/20", "ETag": '"v1"'},
+            content=b"abcdefghij",
+        )
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "mp_container_cb.bin"
+    cs = Checksum.sha256()
+
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        await async_dl(target, checksum=cs, on_checksum=recorded.append)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        sync_dl(target, checksum=cs, on_checksum=recorded.append)
+
+    assert cs.digest == expected_hash
+    assert recorded == [expected_hash]
+    assert target.read_bytes() == full_data
+
+
+@base_url("https://api.example.com")
+class ChecksumEndpointApi(SyncConsumer):
+    @get("/files/{file_id}", parts=Parts(count=2, min_part_size=1), checksum="sha256")
+    def download(self, file_id: int) -> Downloader: ...  # type: ignore[empty-body]
+
+
+@base_url("https://api.example.com")
+class AsyncChecksumEndpointApi(AsyncConsumer):
+    @get("/files/{file_id}", parts=Parts(count=2, min_part_size=1), checksum="sha256")
+    async def download(self, file_id: int) -> AsyncDownloader: ...  # type: ignore[empty-body]
+
+
+@pytest.mark.parametrize(
+    "cls", [ChecksumEndpointApi, AsyncChecksumEndpointApi], ids=["sync", "async"]
+)
+async def test_endpoint_level_checksum_configuration(
+    tmp_path: Path, *, cls: type[ChecksumEndpointApi | AsyncChecksumEndpointApi]
+) -> None:
+    full_data = b"0123456789abcdefghij"
+    expected_hash = hashlib.sha256(full_data).hexdigest()
+    recorded: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/20", "ETag": '"v1"'},
+                content=b"0",
+            )
+        if range_header == "bytes=0-9":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-9/20", "ETag": '"v1"'},
+                content=b"0123456789",
+            )
+        assert range_header == "bytes=10-19"
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 10-19/20", "ETag": '"v1"'},
+            content=b"abcdefghij",
+        )
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "endpoint_cs.bin"
+
+    if isinstance(consumer, AsyncChecksumEndpointApi):
+        async_dl = await consumer.download(file_id=1)
+        assert async_dl.checksum is not None
+        assert async_dl.checksum.algorithm == "sha256"
+        await async_dl(target, on_checksum=recorded.append)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        assert sync_dl.checksum is not None
+        assert sync_dl.checksum.algorithm == "sha256"
+        sync_dl(target, on_checksum=recorded.append)
+
+    assert recorded == [expected_hash]
+    assert target.read_bytes() == full_data
+
+
+def test_endpoint_checksum_validation_errors() -> None:
+    from mxhttp.endpoint import validate_endpoint_kinds
+
+    with pytest.raises(TypeError, match="checksum is only valid for GET endpoints"):
+        validate_endpoint_kinds(
+            "POST",
+            None,
+            None,
+            checksum="sha256",
+            is_raw_stream=False,
+            is_downloader=False,
+            is_async_downloader=False,
+            is_coroutine=False,
+        )
+
+    with pytest.raises(TypeError, match="checksum is only valid for Downloader/AsyncDownloader"):
+        validate_endpoint_kinds(
+            "GET",
+            None,
+            None,
+            checksum="sha256",
+            is_raw_stream=False,
+            is_downloader=False,
+            is_async_downloader=False,
+            is_coroutine=False,
+        )

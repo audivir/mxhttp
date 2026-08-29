@@ -5,11 +5,9 @@ from __future__ import annotations
 import asyncio
 import io
 import itertools
-import sys
 import threading
 import time
 from typing import TYPE_CHECKING
-from unittest.mock import patch
 
 import httpx
 import pytest
@@ -73,15 +71,6 @@ def test_tqdm_progress_context_manager() -> None:
         assert progress.progress_bar is not None
 
     assert progress.progress_bar is None
-
-
-def test_tqdm_progress_missing_tqdm_raises_import_error() -> None:
-    progress = TqdmProgress()
-    with (
-        patch.dict(sys.modules, {"tqdm": None}),
-        pytest.raises(ImportError, match="tqdm is required to use TqdmProgress"),
-    ):
-        progress.start(initial=0, total=100)
 
 
 @base_url("https://api.example.com")
@@ -190,3 +179,121 @@ def test_monotonic_progress_multi_threaded_sync_multi_parts() -> None:
     assert all(a <= b for a, b in itertools.pairwise(history))
     assert history[-1] == total_size
     assert progress.progress_bar is None
+
+
+def test_tqdm_progress_per_part_disabled_delegates_to_call() -> None:
+    buf = io.StringIO()
+    progress = TqdmProgress(desc="Single stream", file=buf, per_part=False)
+    progress.update_part(
+        part_idx=0,
+        part_received=50,
+        part_total=100,
+        current_total=50,
+        total_size=200,
+    )
+    assert progress.progress_bar is not None
+    assert progress.progress_bar.n == 50
+    assert len(progress.part_progress_bars) == 0
+
+    progress.update_part(
+        part_idx=0,
+        part_received=100,
+        part_total=100,
+        current_total=200,
+        total_size=200,
+    )
+    assert progress.progress_bar is None
+
+
+def test_tqdm_progress_per_part_multi_bar_lifecycle() -> None:
+    buf = io.StringIO()
+    progress = TqdmProgress(desc="Multi part", file=buf, per_part=True)
+    assert len(progress.part_progress_bars) == 0
+
+    progress.update_part(
+        part_idx=0,
+        part_received=0,
+        part_total=100,
+        current_total=0,
+        total_size=200,
+    )
+    pb0 = progress.progress_bar
+    assert pb0 is not None
+    assert pb0.n == 0
+    assert 0 in progress.part_progress_bars
+    assert progress.part_progress_bars[0].n == 0
+
+    progress.update_part(
+        part_idx=1,
+        part_received=0,
+        part_total=100,
+        current_total=0,
+        total_size=200,
+    )
+    assert 1 in progress.part_progress_bars
+
+    progress.update_part(
+        part_idx=0,
+        part_received=50,
+        part_total=100,
+        current_total=50,
+        total_size=200,
+    )
+    progress.update_part(
+        part_idx=0,
+        part_received=50,
+        part_total=100,
+        current_total=50,
+        total_size=200,
+    )
+    pb1 = progress.progress_bar
+    assert pb1 is not None
+    assert pb1.n == 50
+    assert progress.part_progress_bars[0].n == 50
+
+    progress.update_part(
+        part_idx=0,
+        part_received=100,
+        part_total=100,
+        current_total=100,
+        total_size=200,
+    )
+
+    progress.update_part(
+        part_idx=1,
+        part_received=100,
+        part_total=100,
+        current_total=200,
+        total_size=200,
+    )
+    assert progress.progress_bar is None
+    assert len(progress.part_progress_bars) == 0
+
+
+def test_tqdm_progress_per_part_late_total_and_context_manager() -> None:
+    buf = io.StringIO()
+    with TqdmProgress(desc="Context multi", file=buf, per_part=True) as progress:
+        progress.update_part(
+            part_idx=0,
+            part_received=10,
+            part_total=50,
+            current_total=10,
+            total_size=None,
+        )
+        pb = progress.progress_bar
+        assert pb is not None
+        assert pb.total is None
+
+        progress.update_part(
+            part_idx=0,
+            part_received=20,
+            part_total=50,
+            current_total=20,
+            total_size=100,
+        )
+        pb2 = progress.progress_bar
+        assert pb2 is not None
+        assert pb2.total == 100
+
+    assert progress.progress_bar is None
+    assert len(progress.part_progress_bars) == 0

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
 import os
 import threading
 import time
@@ -14,6 +15,13 @@ from typing import TYPE_CHECKING, TypeAlias
 
 import msgspec
 
+from mxhttp.checksum import (
+    Checksum,
+    ChecksumCallback,
+    ChecksumInput,
+    resolve_checksum,
+    verify_checksum,
+)
 from mxhttp.concurrency import Concurrency, gate_concurrency_async, gate_concurrency_sync
 from mxhttp.consumer import AsyncConsumer, SyncConsumer  # noqa: TC001
 from mxhttp.ratelimit import RateLimit, gate_async, gate_sync
@@ -33,12 +41,32 @@ if TYPE_CHECKING:
     from _typeshed import StrPath
 
 ProgressCallback: TypeAlias = "Callable[[int, int | None], None]"
+PartProgressCallback: TypeAlias = "Callable[[int, int, int], None]"
 
 
 def _notify(callback: ProgressCallback | None, received: int, total: int | None) -> None:
     """Invokes the synchronous progress callback if provided."""
     if callback is not None:
         callback(received, total)
+
+
+def _notify_part(  # noqa: PLR0913, PLR0917
+    callback: ProgressCallback | None,
+    part_callback: PartProgressCallback | None,
+    part_idx: int,
+    part_received: int,
+    part_total: int,
+    current_total: int,
+    total_size: int | None,
+) -> None:
+    """Invokes progress callbacks for a specific part and overall total."""
+    if part_callback is not None:
+        part_callback(part_idx, part_received, part_total)
+    if callback is not None:
+        if hasattr(callback, "update_part"):
+            callback.update_part(part_idx, part_received, part_total, current_total, total_size)
+        else:
+            callback(current_total, total_size)
 
 
 class DownloadIdentityError(Exception):
@@ -231,18 +259,23 @@ class Downloader(msgspec.Struct, frozen=True):
     ratelimit: RateLimit | None = None
     concurrency: Concurrency | None = None
     parts: Parts | None = None
+    checksum: Checksum | None = None
 
-    def __call__(
+    def __call__(  # noqa: PLR0913
         self,
         path: StrPath,
         *,
         overwrite: bool = False,
         on_progress: ProgressCallback | None = None,
+        on_part_progress: PartProgressCallback | None = None,
         parts: int | Parts | None = None,
+        checksum: ChecksumInput = None,
+        on_checksum: ChecksumCallback | None = None,
     ) -> Path:
         """Downloads (or resumes) to `path`, returning it once the download completes cleanly.
 
         Raises:
+            ChecksumMismatchError: If the downloaded file digest does not match expected checksum.
             DownloadIdentityError: If a `.part` file exists for a different resource. Pass
                 `overwrite=True` to discard it and start over.
             ResumeLostError: If a reconnect gets a full response instead of a partial one.
@@ -255,6 +288,9 @@ class Downloader(msgspec.Struct, frozen=True):
             try:
                 with FileLock(lock_path, timeout=0, fallback_to_soft=False):
                     parts_config = resolve_parts(self.parts if parts is None else parts)
+                    checksum_config = resolve_checksum(
+                        self.checksum if checksum is None else checksum
+                    )
                     if parts_config is None or parts_config.count == 1:
                         return self._download_single_stream(
                             target,
@@ -262,6 +298,8 @@ class Downloader(msgspec.Struct, frozen=True):
                             state_path,
                             overwrite=overwrite,
                             on_progress=on_progress,
+                            checksum_config=checksum_config,
+                            on_checksum=on_checksum,
                         )
                     return self._download_multi_part(
                         target,
@@ -270,11 +308,14 @@ class Downloader(msgspec.Struct, frozen=True):
                         parts_config=parts_config,
                         overwrite=overwrite,
                         on_progress=on_progress,
+                        on_part_progress=on_part_progress,
+                        checksum_config=checksum_config,
+                        on_checksum=on_checksum,
                     )
             except Timeout as e:
                 raise DownloadLockError(f"Download to {target} is locked by another process") from e
 
-    def _download_single_stream(
+    def _download_single_stream(  # noqa: C901, PLR0913
         self,
         target: Path,
         part_path: Path,
@@ -282,10 +323,21 @@ class Downloader(msgspec.Struct, frozen=True):
         *,
         overwrite: bool,
         on_progress: ProgressCallback | None,
+        checksum_config: Checksum | None = None,
+        on_checksum: ChecksumCallback | None = None,
     ) -> Path:
         received, validator = load_resume_state(
             part_path, state_path, self.spec.url, overwrite=overwrite
         )
+
+        hasher = hashlib.new(checksum_config.algorithm) if checksum_config is not None else None
+        if hasher is not None and received > 0 and part_path.exists():
+            with part_path.open("rb") as pfh:
+                while True:
+                    buf = pfh.read(1024 * 1024)
+                    if not buf:
+                        break
+                    hasher.update(buf)
 
         attempt = 0
         with part_path.open("ab" if received else "wb") as fh:
@@ -306,6 +358,8 @@ class Downloader(msgspec.Struct, frozen=True):
                         _notify(on_progress, received, total)
                         for chunk in response.iter_bytes():
                             fh.write(chunk)
+                            if hasher is not None:
+                                hasher.update(chunk)
                             fh.flush()
                             os.fsync(fh.fileno())
                             received += len(chunk)
@@ -318,6 +372,9 @@ class Downloader(msgspec.Struct, frozen=True):
                     if attempt >= self.retry.attempts:
                         raise
                     time.sleep(resolve_delay(self.retry, attempt, extract_response(e)))
+
+        if checksum_config is not None and hasher is not None:
+            verify_checksum(hasher.hexdigest(), checksum_config, on_checksum)
 
         part_path.replace(target)
         cleanup_staging_files(target)
@@ -332,6 +389,9 @@ class Downloader(msgspec.Struct, frozen=True):
         parts_config: Parts,
         overwrite: bool,
         on_progress: ProgressCallback | None,
+        on_part_progress: PartProgressCallback | None,
+        checksum_config: Checksum | None = None,
+        on_checksum: ChecksumCallback | None = None,
     ) -> Path:
         saved_state: MultiPartState | None = None
         if not overwrite and state_path.exists():
@@ -358,31 +418,31 @@ class Downloader(msgspec.Struct, frozen=True):
                 apply_streaming_response_handler(self.consumer, probe_resp)
                 if probe_resp.status_code != HTTPStatus.PARTIAL_CONTENT:
                     cleanup_staging_files(target)
-                    validator = write_state(state_path, self.spec.url, probe_resp)
-                    total = extract_total_size(probe_resp, 0)
-                    received = 0
-                    _notify(on_progress, received, total)
-                    with part_path.open("wb") as fh:
-                        for chunk in probe_resp.iter_bytes():
-                            fh.write(chunk)
-                            received += len(chunk)
-                            _notify(on_progress, received, total)
-                        fh.flush()
-                        os.fsync(fh.fileno())
-                    part_path.replace(target)
-                    cleanup_staging_files(target)
-                    return target
-
+                    return self._download_single_stream(
+                        target,
+                        part_path,
+                        state_path,
+                        overwrite=overwrite,
+                        on_progress=on_progress,
+                        checksum_config=checksum_config,
+                        on_checksum=on_checksum,
+                    )
                 total_size = extract_total_size(probe_resp, 0)
+                if total_size is None or parts_config.resolve_count(total_size) <= 1:
+                    cleanup_staging_files(target)
+                    return self._download_single_stream(
+                        target,
+                        part_path,
+                        state_path,
+                        overwrite=overwrite,
+                        on_progress=on_progress,
+                        checksum_config=checksum_config,
+                        on_checksum=on_checksum,
+                    )
+
                 etag = probe_resp.headers.get("etag")
                 last_modified = probe_resp.headers.get("last-modified")
                 validator = etag or last_modified
-
-            if total_size is None or parts_config.resolve_count(total_size) <= 1:
-                cleanup_staging_files(target)
-                return self._download_single_stream(
-                    target, part_path, state_path, overwrite=overwrite, on_progress=on_progress
-                )
 
             num_parts = parts_config.resolve_count(total_size)
             ranges = compute_ranges(total_size, num_parts)
@@ -414,7 +474,19 @@ class Downloader(msgspec.Struct, frozen=True):
             received_per_part[i] = parts_state[i].received
 
         lock = threading.Lock()
-        _notify(on_progress, sum(received_per_part), total_size)
+        with lock:
+            current_total = sum(received_per_part)
+        for i, p_info in enumerate(parts_state):
+            p_total = p_info.end - p_info.start + 1
+            _notify_part(
+                on_progress,
+                on_part_progress,
+                i,
+                p_info.received,
+                p_total,
+                current_total,
+                total_size,
+            )
 
         def download_segment(part_idx: int) -> None:
             part_info = parts_state[part_idx]
@@ -449,7 +521,16 @@ class Downloader(msgspec.Struct, frozen=True):
                                 with lock:
                                     received_per_part[part_idx] = part_info.received
                                     current_total = sum(received_per_part)
-                                _notify(on_progress, current_total, total_size)
+                                part_total = part_info.end - part_info.start + 1
+                                _notify_part(
+                                    on_progress,
+                                    on_part_progress,
+                                    part_idx,
+                                    part_info.received,
+                                    part_total,
+                                    current_total,
+                                    total_size,
+                                )
                     break
                 except retryable_exceptions(self.retry.on) as e:
                     if not is_retryable_exception(e, self.retry):
@@ -464,6 +545,8 @@ class Downloader(msgspec.Struct, frozen=True):
             for future in concurrent.futures.as_completed(futures):
                 future.result()
 
+        hasher = hashlib.new(checksum_config.algorithm) if checksum_config is not None else None
+
         with part_path.open("wb") as out_fh:
             for i in range(num_parts):
                 seg_path = target.with_name(f"{target.name}.part.{i}")
@@ -473,9 +556,14 @@ class Downloader(msgspec.Struct, frozen=True):
                         if not buf:
                             break
                         out_fh.write(buf)
+                        if hasher is not None:
+                            hasher.update(buf)
                 seg_path.unlink(missing_ok=True)
             out_fh.flush()
             os.fsync(out_fh.fileno())
+
+        if checksum_config is not None and hasher is not None:
+            verify_checksum(hasher.hexdigest(), checksum_config, on_checksum)
 
         part_path.replace(target)
         cleanup_staging_files(target)
@@ -491,18 +579,23 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
     ratelimit: RateLimit | None = None
     concurrency: Concurrency | None = None
     parts: Parts | None = None
+    checksum: Checksum | None = None
 
-    async def __call__(
+    async def __call__(  # noqa: PLR0913
         self,
         path: StrPath,
         *,
         overwrite: bool = False,
         on_progress: ProgressCallback | None = None,
+        on_part_progress: PartProgressCallback | None = None,
         parts: int | Parts | None = None,
+        checksum: ChecksumInput = None,
+        on_checksum: ChecksumCallback | None = None,
     ) -> Path:
         """Downloads (or resumes) to `path`, returning it once the download completes cleanly.
 
         Raises:
+            ChecksumMismatchError: If the downloaded file digest does not match expected checksum.
             DownloadIdentityError: If a `.part` file exists for a different resource. Pass
                 `overwrite=True` to discard it and start over.
             ResumeLostError: If a reconnect gets a full response instead of a partial one.
@@ -518,6 +611,9 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
             try:
                 async with AsyncFileLock(lock_path, timeout=0, fallback_to_soft=False):
                     parts_config = resolve_parts(self.parts if parts is None else parts)
+                    checksum_config = resolve_checksum(
+                        self.checksum if checksum is None else checksum
+                    )
                     if parts_config is None or parts_config.count == 1:
                         return await self._download_single_stream_async(
                             target,
@@ -525,6 +621,8 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                             state_path,
                             overwrite=overwrite,
                             on_progress=on_progress,
+                            checksum_config=checksum_config,
+                            on_checksum=on_checksum,
                         )
                     return await self._download_multi_part_async(
                         target,
@@ -533,11 +631,14 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                         parts_config=parts_config,
                         overwrite=overwrite,
                         on_progress=on_progress,
+                        on_part_progress=on_part_progress,
+                        checksum_config=checksum_config,
+                        on_checksum=on_checksum,
                     )
             except Timeout as e:
                 raise DownloadLockError(f"Download to {target} is locked by another process") from e
 
-    async def _download_single_stream_async(
+    async def _download_single_stream_async(  # noqa: C901, PLR0913
         self,
         target: anyio.Path,
         part_path: anyio.Path,
@@ -545,10 +646,21 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
         *,
         overwrite: bool,
         on_progress: ProgressCallback | None,
+        checksum_config: Checksum | None = None,
+        on_checksum: ChecksumCallback | None = None,
     ) -> Path:
         received, validator = await load_resume_state_async(
             part_path, state_path, self.spec.url, overwrite=overwrite
         )
+
+        hasher = hashlib.new(checksum_config.algorithm) if checksum_config is not None else None
+        if hasher is not None and received > 0 and await part_path.exists():
+            async with await part_path.open("rb") as pfh:
+                while True:
+                    buf = await pfh.read(1024 * 1024)
+                    if not buf:
+                        break
+                    hasher.update(buf)
 
         attempt = 0
         async with await part_path.open("ab" if received else "wb") as fh:
@@ -569,6 +681,8 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                         _notify(on_progress, received, total)
                         async for chunk in response.aiter_bytes():
                             await fh.write(chunk)
+                            if hasher is not None:
+                                hasher.update(chunk)
                             received += len(chunk)
                             _notify(on_progress, received, total)
                     await fh.flush()
@@ -581,6 +695,9 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                         raise
                     await fh.flush()
                     await asyncio.sleep(resolve_delay(self.retry, attempt, extract_response(e)))
+
+        if checksum_config is not None and hasher is not None:
+            verify_checksum(hasher.hexdigest(), checksum_config, on_checksum)
 
         await part_path.replace(target)
         await cleanup_staging_files_async(target)
@@ -595,6 +712,9 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
         parts_config: Parts,
         overwrite: bool,
         on_progress: ProgressCallback | None,
+        on_part_progress: PartProgressCallback | None,
+        checksum_config: Checksum | None = None,
+        on_checksum: ChecksumCallback | None = None,
     ) -> Path:
         import anyio
 
@@ -625,30 +745,32 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                 apply_streaming_response_handler(self.consumer, probe_resp)
                 if probe_resp.status_code != HTTPStatus.PARTIAL_CONTENT:
                     await cleanup_staging_files_async(target)
-                    validator = await write_state_async(state_path, self.spec.url, probe_resp)
-                    total = extract_total_size(probe_resp, 0)
-                    received = 0
-                    _notify(on_progress, received, total)
-                    async with await part_path.open("wb") as fh:
-                        async for chunk in probe_resp.aiter_bytes():
-                            await fh.write(chunk)
-                            received += len(chunk)
-                            _notify(on_progress, received, total)
-                        await fh.flush()
-                    await part_path.replace(target)
-                    await cleanup_staging_files_async(target)
-                    return Path(target)
+                    return await self._download_single_stream_async(
+                        target,
+                        part_path,
+                        state_path,
+                        overwrite=overwrite,
+                        on_progress=on_progress,
+                        checksum_config=checksum_config,
+                        on_checksum=on_checksum,
+                    )
 
                 total_size = extract_total_size(probe_resp, 0)
+                if total_size is None or parts_config.resolve_count(total_size) <= 1:
+                    await cleanup_staging_files_async(target)
+                    return await self._download_single_stream_async(
+                        target,
+                        part_path,
+                        state_path,
+                        overwrite=overwrite,
+                        on_progress=on_progress,
+                        checksum_config=checksum_config,
+                        on_checksum=on_checksum,
+                    )
+
                 etag = probe_resp.headers.get("etag")
                 last_modified = probe_resp.headers.get("last-modified")
                 validator = etag or last_modified
-
-            if total_size is None or parts_config.resolve_count(total_size) <= 1:
-                await cleanup_staging_files_async(target)
-                return await self._download_single_stream_async(
-                    target, part_path, state_path, overwrite=overwrite, on_progress=on_progress
-                )
 
             num_parts = parts_config.resolve_count(total_size)
             ranges = compute_ranges(total_size, num_parts)
@@ -679,7 +801,18 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                 parts_state[i].received = 0
             received_per_part[i] = parts_state[i].received
 
-        _notify(on_progress, sum(received_per_part), total_size)
+        current_total = sum(received_per_part)
+        for i, p_info in enumerate(parts_state):
+            p_total = p_info.end - p_info.start + 1
+            _notify_part(
+                on_progress,
+                on_part_progress,
+                i,
+                p_info.received,
+                p_total,
+                current_total,
+                total_size,
+            )
 
         async def download_segment_async(part_idx: int) -> None:
             part_info = parts_state[part_idx]
@@ -712,7 +845,16 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                                 part_info.received += len(chunk)
                                 received_per_part[part_idx] = part_info.received
                                 current_total = sum(received_per_part)
-                                _notify(on_progress, current_total, total_size)
+                                part_total = part_info.end - part_info.start + 1
+                                _notify_part(
+                                    on_progress,
+                                    on_part_progress,
+                                    part_idx,
+                                    part_info.received,
+                                    part_total,
+                                    current_total,
+                                    total_size,
+                                )
                             await sfh.flush()
                     break
                 except retryable_exceptions(self.retry.on) as e:
@@ -727,6 +869,8 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
             for i in range(num_parts):
                 _ = tg.start_soon(download_segment_async, i)
 
+        hasher = hashlib.new(checksum_config.algorithm) if checksum_config is not None else None
+
         async with await part_path.open("wb") as out_fh:
             for i in range(num_parts):
                 seg_path = target.with_name(f"{target.name}.part.{i}")
@@ -736,8 +880,13 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                         if not buf:
                             break
                         await out_fh.write(buf)
+                        if hasher is not None:
+                            hasher.update(buf)
                 await seg_path.unlink(missing_ok=True)
             await out_fh.flush()
+
+        if checksum_config is not None and hasher is not None:
+            verify_checksum(hasher.hexdigest(), checksum_config, on_checksum)
 
         await part_path.replace(target)
         await cleanup_staging_files_async(target)

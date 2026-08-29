@@ -314,6 +314,40 @@ path = downloader(
 - Segments are re-assembled into the destination file upon completion.
 - Each segment supports resumption independently. Interrupted downloads resume remaining bytes for incomplete parts from disk.
 - Pass `parts=` on the downloader call `downloader(path, parts=8)` to override endpoint defaults at runtime.
+- Pass `on_part_progress=` to receive slice-level updates `(part_index, received_bytes, total_bytes)` for each worker.
+- Pass `on_progress=TqdmProgress(desc="Downloading", per_part=True)` to render an overall progress bar together with individual sub-bars for each active part.
+
+#### Checksum verification
+
+Validate data integrity or compute cryptographic digests for `Downloader` and `AsyncDownloader` endpoints via `checksum=`:
+
+```python
+from mxhttp import Checksum, Downloader, SyncConsumer, get
+
+
+class Releases(SyncConsumer):
+    @get("/downloads/{version}", parts=4)
+    def fetch_release(self, version: str) -> Downloader: ...  # type: ignore[empty-body]
+
+
+releases = Releases()
+downloader = releases.fetch_release(version="v1.0.0")
+
+# Validate against expected SHA-256 hash (raises ChecksumMismatchError on mismatch):
+path = downloader(
+    "/tmp/release.tar.gz",
+    checksum="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+)
+
+# Or capture computed digest:
+cs = Checksum.sha256()
+path = downloader("/tmp/release.tar.gz", checksum=cs, on_checksum=print)
+print(f"Calculated hash: {cs.digest}")
+```
+
+- `checksum=` accepts hex strings (64-character SHA-256, 128-character SHA-512, 32-character MD5), prefixed strings (`"sha256:<hex>"`), algorithm names (`"sha256"`), or `Checksum` objects (`Checksum.sha256()`).
+- Mismatch raises `ChecksumMismatchError` without replacing the destination path.
+- Hashes are computed in-stream during download and segment assembly.
 
 ### Server-Sent Events
 
