@@ -16,6 +16,7 @@ from typing import (
     overload,
 )
 
+from mxhttp.concurrency import Concurrency, gate_concurrency_async, gate_concurrency_sync
 from mxhttp.consumer import validate_scheme
 from mxhttp.download import AsyncDownloader, Downloader
 from mxhttp.parse import split_path_template
@@ -138,6 +139,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
     ratelimit: RateLimit | Missing | None = MISSING,
     resumable: Retry | None = None,
     base_url: str | Missing = MISSING,
+    concurrency: int | Concurrency | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Shared implementation for the HTTP method decorator factories.
 
@@ -151,9 +153,11 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
         resumable: Reconnects with `Range` (using this `Retry` for reconnect attempts and
             backoff) if the connection drops mid-stream. Only valid for `GET` endpoints
             returning `Iterator[bytes]`/`AsyncIterator[bytes]`/`Downloader`/`AsyncDownloader`.
-        For `Downloader`/`AsyncDownloader`, defaults to `Retry()` rather than disabling
+            For `Downloader`/`AsyncDownloader`, defaults to `Retry()` rather than disabling
             reconnects, since resumability is the entire point of that return type.
         base_url: Overrides the class-level base URL for this endpoint only.
+        concurrency: Overrides the class-level `Concurrency` config for this endpoint only.
+            Pass `None` explicitly to disable concurrency limits for this endpoint only.
     """
     if path.startswith(("http://", "https://")):
         if base_url is not MISSING:
@@ -217,6 +221,14 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
             """Resolves the endpoint rate-limit override, falling back to the consumer default."""
             return self._ratelimit if ratelimit is MISSING else ratelimit
 
+        def resolve_concurrency(self: BaseConsumer) -> Concurrency | None:
+            """Resolves the endpoint concurrency override, falling back to consumer default."""
+            if concurrency is MISSING:
+                return self._concurrency
+            if isinstance(concurrency, int):
+                return Concurrency(limit=concurrency)
+            return concurrency
+
         if is_coroutine:
             if is_async_downloader:
 
@@ -226,7 +238,11 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
                 ) -> AsyncDownloader:
                     spec = resolve_spec(self, *args, **kwargs)
                     return AsyncDownloader(
-                        self, spec, resumable or Retry(), resolve_ratelimit(self)
+                        self,
+                        spec,
+                        resumable or Retry(),
+                        resolve_ratelimit(self),
+                        resolve_concurrency(self),
                     )
 
                 return async_downloader_wrapper  # type: ignore[return-value]
@@ -239,7 +255,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
                 ) -> AsyncIterator[Event]:
                     await gate_async(self, resolve_ratelimit(self))
                     spec = resolve_spec(self, *args, **kwargs)
-                    return sse_async(self, spec)
+                    return sse_async(self, spec, resolve_concurrency(self))
 
                 return async_sse_wrapper  # type: ignore[return-value]
 
@@ -252,8 +268,10 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
                     await gate_async(self, resolve_ratelimit(self))
                     spec = resolve_spec(self, *args, **kwargs)
                     if resumable is not None:
-                        return resumable_stream_async(self, spec, resumable)
-                    return stream_async(self, spec)
+                        return resumable_stream_async(
+                            self, spec, resumable, resolve_concurrency(self)
+                        )
+                    return stream_async(self, spec, resolve_concurrency(self))
 
                 return async_stream_wrapper  # type: ignore[return-value]
 
@@ -261,10 +279,11 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
             async def async_wrapper(
                 self: AsyncConsumer, *args: P.args, **kwargs: P.kwargs
             ) -> Parsed_T:
-                await gate_async(self, resolve_ratelimit(self))
-                spec = resolve_spec(self, *args, **kwargs)
-                response = await request_async(self, spec, resolve_retry(self))
-                return decode(apply_response_handler(self, response), return_type)
+                async with gate_concurrency_async(self, resolve_concurrency(self)):
+                    await gate_async(self, resolve_ratelimit(self))
+                    spec = resolve_spec(self, *args, **kwargs)
+                    response = await request_async(self, spec, resolve_retry(self))
+                    return decode(apply_response_handler(self, response), return_type)
 
             return async_wrapper  # type: ignore[return-value]
 
@@ -275,7 +294,13 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
                 self: SyncConsumer, *args: P.args, **kwargs: P.kwargs
             ) -> Downloader:
                 spec = resolve_spec(self, *args, **kwargs)
-                return Downloader(self, spec, resumable or Retry(), resolve_ratelimit(self))
+                return Downloader(
+                    self,
+                    spec,
+                    resumable or Retry(),
+                    resolve_ratelimit(self),
+                    resolve_concurrency(self),
+                )
 
             return downloader_wrapper  # type: ignore[return-value]
 
@@ -287,7 +312,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
             ) -> Iterator[Event]:
                 gate_sync(self, resolve_ratelimit(self))
                 spec = resolve_spec(self, *args, **kwargs)
-                return sse_sync(self, spec)
+                return sse_sync(self, spec, resolve_concurrency(self))
 
             return sync_sse_wrapper  # type: ignore[return-value]
 
@@ -300,8 +325,8 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
                 gate_sync(self, resolve_ratelimit(self))
                 spec = resolve_spec(self, *args, **kwargs)
                 if resumable is not None:
-                    return resumable_stream_sync(self, spec, resumable)
-                return stream_sync(self, spec)
+                    return resumable_stream_sync(self, spec, resumable, resolve_concurrency(self))
+                return stream_sync(self, spec, resolve_concurrency(self))
 
             return sync_stream_wrapper  # type: ignore[return-value]
 
@@ -311,25 +336,27 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
             *args: P.args,
             **kwargs: P.kwargs,
         ) -> Parsed_T:
-            gate_sync(self, resolve_ratelimit(self))
-            spec = resolve_spec(self, *args, **kwargs)
-            response = request_sync(self, spec, resolve_retry(self))
-            return decode(apply_response_handler(self, response), return_type)
+            with gate_concurrency_sync(self, resolve_concurrency(self)):
+                gate_sync(self, resolve_ratelimit(self))
+                spec = resolve_spec(self, *args, **kwargs)
+                response = request_sync(self, spec, resolve_retry(self))
+                return decode(apply_response_handler(self, response), return_type)
 
         return sync_wrapper  # type: ignore[return-value]
 
     return decorate  # type: ignore[return-value]
 
 
-def get(
+def get(  # noqa: PLR0913,PLR0917
     path: str,
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
     resumable: Retry | None = None,
     base_url: str | Missing = MISSING,
+    concurrency: int | Concurrency | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `GET {path}`."""
-    return endpoint("GET", path, retry, ratelimit, resumable, base_url)
+    return endpoint("GET", path, retry, ratelimit, resumable, base_url, concurrency)
 
 
 def post(
@@ -337,9 +364,10 @@ def post(
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
     base_url: str | Missing = MISSING,
+    concurrency: int | Concurrency | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `POST {path}`."""
-    return endpoint("POST", path, retry, ratelimit, base_url=base_url)
+    return endpoint("POST", path, retry, ratelimit, base_url=base_url, concurrency=concurrency)
 
 
 def put(
@@ -347,9 +375,10 @@ def put(
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
     base_url: str | Missing = MISSING,
+    concurrency: int | Concurrency | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `PUT {path}`."""
-    return endpoint("PUT", path, retry, ratelimit, base_url=base_url)
+    return endpoint("PUT", path, retry, ratelimit, base_url=base_url, concurrency=concurrency)
 
 
 def patch(
@@ -357,9 +386,10 @@ def patch(
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
     base_url: str | Missing = MISSING,
+    concurrency: int | Concurrency | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `PATCH {path}`."""
-    return endpoint("PATCH", path, retry, ratelimit, base_url=base_url)
+    return endpoint("PATCH", path, retry, ratelimit, base_url=base_url, concurrency=concurrency)
 
 
 def delete(
@@ -367,9 +397,10 @@ def delete(
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
     base_url: str | Missing = MISSING,
+    concurrency: int | Concurrency | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `DELETE {path}`."""
-    return endpoint("DELETE", path, retry, ratelimit, base_url=base_url)
+    return endpoint("DELETE", path, retry, ratelimit, base_url=base_url, concurrency=concurrency)
 
 
 def head(
@@ -377,6 +408,7 @@ def head(
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
     base_url: str | Missing = MISSING,
+    concurrency: int | Concurrency | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `HEAD {path}`."""
-    return endpoint("HEAD", path, retry, ratelimit, base_url=base_url)
+    return endpoint("HEAD", path, retry, ratelimit, base_url=base_url, concurrency=concurrency)

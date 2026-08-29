@@ -33,6 +33,7 @@ dependencies = ["anyio", "filelock", "httpx", "msgspec", "typing-extensions"]
 
 [project.optional-dependencies]
 pydantic = ["pydantic"]
+tqdm = ["tqdm"]
 
 [project.urls]
 Homepage = "https://github.com/audivir/mxhttp"
@@ -49,6 +50,7 @@ dev = [
   "pytest-mypy-testing",
   "attrs",
   "pydantic",
+  "tqdm",
 ]
 
 [tool.pdm.version]

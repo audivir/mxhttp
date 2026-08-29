@@ -92,3 +92,10 @@ def split_path_template(path: str) -> ParsedPath:  # noqa: C901, PLR0912
         else:
             static_query[unescape(key)] = unescape(value)
     return ParsedPath(path_only, static_query, inline_query_names)
+
+
+def host_port(url: str) -> tuple[str, int]:
+    """Extracts the `(host, port)` pair from a URL, defaulting the port by scheme."""
+    parts = urllib.parse.urlsplit(url)
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    return parts.hostname or "", port

@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
     import httpx
 
+    from mxhttp.concurrency import Concurrency
     from mxhttp.ratelimit import RateLimit
     from mxhttp.retry import Retry
     from mxhttp.types import AnyC_T, ResponseHandler
@@ -46,6 +47,7 @@ class BaseConsumer:
     _streaming_response_handler: ResponseHandler | None = None
     _retry: Retry | None = None
     _ratelimit: RateLimit | None = None
+    _concurrency: Concurrency | None = None
 
     def __init__(
         self,
@@ -71,6 +73,11 @@ class BaseConsumer:
     def base_url(self) -> str | None:
         """The base URL configured for the consumer class."""
         return self._base_url
+
+    @property
+    def concurrency(self) -> Concurrency | None:
+        """The concurrency configuration for the consumer class."""
+        return self._concurrency
 
     @property
     def session(self) -> httpx.Client | httpx.AsyncClient:

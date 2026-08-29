@@ -37,9 +37,7 @@ class Shop(SyncConsumer):
     def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
 
     @get("/search")
-    def search(
-        self, q: Annotated[str, Query], limit: Annotated[int, Query] = 20
-    ) -> list[Item]: ...  # type: ignore[empty-body]
+    def search(self, q: Annotated[str, Query], limit: Annotated[int, Query] = 20) -> list[Item]: ...  # type: ignore[empty-body]
 
     @post("/items")
     def create_item(self, item: Annotated[NewItem, Body]) -> Item: ...  # type: ignore[empty-body]
@@ -195,6 +193,26 @@ class Shop(SyncConsumer):
 - Pass `key="custom_pool"` to `RateLimit` to partition rate limits into dedicated pools or keep method quotas isolated from each other.
 - Pass `ratelimit=` directly to `@get`/`@post`/etc. to override the class configuration for that one endpoint, or `ratelimit=None` to disable rate limiting for it.
 
+### Concurrency control
+
+Configure maximum simultaneous in-flight requests with `@concurrency` on the class:
+
+```python
+from mxhttp import Concurrency, SyncConsumer, concurrency, get
+
+
+@concurrency(Concurrency(limit=5))
+class Shop(SyncConsumer):
+    @get("/items/{item_id}")
+    def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
+```
+
+- `@concurrency(5)` accepts an integer shorthand for `limit`.
+- Semaphores are scoped to `(host, port)` and shared across instances using the same pool key.
+- By default, requests over the limit block until a slot is released. Set `block=False` to raise `ConcurrencyExceededError` immediately instead, or set `timeout=` to raise `ConcurrencyTimeoutError` if waiting exceeds that duration in seconds.
+- Pass `key="custom_pool"` to `Concurrency` to isolate concurrency quotas between different services or endpoints.
+- Pass `concurrency=` directly to `@get`/`@post`/etc. to override the class configuration for that one endpoint, or `concurrency=None` to disable concurrency limiting for it.
+
 ### Streaming responses
 
 Annotate the return type as `Iterator[bytes]` (sync) or `AsyncIterator[bytes]` (async) to stream the response body in chunks.
@@ -245,7 +263,7 @@ class Files(SyncConsumer):
 Annotate the return type as `Downloader` (sync) or `AsyncDownloader` (async) instead of `Iterator[bytes]` to get a callable that downloads straight to a file, resuming an interrupted download by calling it again with the same path, even across separate process runs:
 
 ```python
-from mxhttp import Downloader
+from mxhttp import Downloader, TqdmProgress
 
 
 class Files(SyncConsumer):
@@ -256,7 +274,7 @@ class Files(SyncConsumer):
 downloader = shop_files.download(file_id=7)
 path = downloader(
     "/tmp/report.pdf",
-    on_progress=lambda received, total: print(f"Progress: {received}/{total}"),
+    on_progress=TqdmProgress(desc="Downloading report"),
 )
 
 # if the process is interrupted, calling it again resumes from disk:
@@ -268,7 +286,7 @@ path = shop_files.download(file_id=7)("/tmp/report.pdf")
 - Downloads to `{path}.part` plus a `{path}.part.json` sidecar recording the source URL and `ETag`/`Last-Modified`. Only on a clean finish is `{path}.part` atomically renamed to `path` and the sidecar removed, so `path` itself is never observed half-written.
 - Non-blocking advisory file locking protects concurrent writers from data corruption, raising `DownloadLockError` on contention and releasing cleanly on process exit or termination signals.
 - Calling the `Downloader` again for the same `path` resumes from `{path}.part` if its sidecar identity matches the current request. A mismatch raises `DownloadIdentityError` rather than silently appending to or discarding data. Pass `overwrite=True` to discard existing data and start over.
-- Pass `on_progress=` to receive progress updates `(received_bytes, total_bytes_or_None)` as chunks arrive.
+- Pass `on_progress=` to receive progress updates `(received_bytes, total_bytes_or_None)` as chunks arrive, or pass `TqdmProgress(desc="Downloading file")` for built-in terminal progress bars.
 
 ### Server-Sent Events
 

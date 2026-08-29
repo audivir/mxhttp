@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, TypeAlias
 
 import msgspec
 
+from mxhttp.concurrency import Concurrency, gate_concurrency_async, gate_concurrency_sync
 from mxhttp.consumer import AsyncConsumer, SyncConsumer  # noqa: TC001
 from mxhttp.ratelimit import RateLimit, gate_async, gate_sync
 from mxhttp.request import RequestSpec  # noqa: TC001
@@ -142,6 +143,7 @@ class Downloader(msgspec.Struct, frozen=True):
     spec: RequestSpec
     retry: Retry
     ratelimit: RateLimit | None = None
+    concurrency: Concurrency | None = None
 
     def __call__(
         self,
@@ -159,53 +161,59 @@ class Downloader(msgspec.Struct, frozen=True):
         """
         from filelock import FileLock, Timeout
 
-        target = Path(path)
-        part_path, state_path, lock_path = part_paths(target)
-        try:
-            with FileLock(lock_path, timeout=0, fallback_to_soft=False):
-                received, validator = load_resume_state(
-                    part_path, state_path, self.spec.url, overwrite=overwrite
-                )
+        with gate_concurrency_sync(self.consumer, self.concurrency):
+            target = Path(path)
+            part_path, state_path, lock_path = part_paths(target)
+            try:
+                with FileLock(lock_path, timeout=0, fallback_to_soft=False):
+                    received, validator = load_resume_state(
+                        part_path, state_path, self.spec.url, overwrite=overwrite
+                    )
 
-                attempt = 0
-                with part_path.open("ab" if received else "wb") as fh:
-                    while True:
-                        gate_sync(self.consumer, self.ratelimit)
-                        kwargs = self.spec.to_kwargs()
-                        kwargs["headers"] = resume_headers(self.spec, received, validator) or None
-                        try:
-                            with self.consumer.session.stream(
-                                self.spec.method, self.spec.url, **kwargs
-                            ) as response:
-                                apply_streaming_response_handler(self.consumer, response)
-                                if received and response.status_code != HTTPStatus.PARTIAL_CONTENT:
-                                    raise ResumeLostError(
-                                        "server ignored Range or the resource changed"
-                                    )
-                                if validator is None:
-                                    validator = write_state(state_path, self.spec.url, response)
-                                total = extract_total_size(response, received)
-                                _notify(on_progress, received, total)
-                                for chunk in response.iter_bytes():
-                                    fh.write(chunk)
-                                    fh.flush()
-                                    os.fsync(fh.fileno())
-                                    received += len(chunk)
+                    attempt = 0
+                    with part_path.open("ab" if received else "wb") as fh:
+                        while True:
+                            gate_sync(self.consumer, self.ratelimit)
+                            kwargs = self.spec.to_kwargs()
+                            kwargs["headers"] = (
+                                resume_headers(self.spec, received, validator) or None
+                            )
+                            try:
+                                with self.consumer.session.stream(
+                                    self.spec.method, self.spec.url, **kwargs
+                                ) as response:
+                                    apply_streaming_response_handler(self.consumer, response)
+                                    if (
+                                        received
+                                        and response.status_code != HTTPStatus.PARTIAL_CONTENT
+                                    ):
+                                        raise ResumeLostError(
+                                            "server ignored Range or the resource changed"
+                                        )
+                                    if validator is None:
+                                        validator = write_state(state_path, self.spec.url, response)
+                                    total = extract_total_size(response, received)
                                     _notify(on_progress, received, total)
-                            break
-                        except retryable_exceptions(self.retry.on) as e:
-                            if not is_retryable_exception(e, self.retry):
-                                raise
-                            attempt += 1
-                            if attempt >= self.retry.attempts:
-                                raise
-                            time.sleep(resolve_delay(self.retry, attempt, extract_response(e)))
+                                    for chunk in response.iter_bytes():
+                                        fh.write(chunk)
+                                        fh.flush()
+                                        os.fsync(fh.fileno())
+                                        received += len(chunk)
+                                        _notify(on_progress, received, total)
+                                break
+                            except retryable_exceptions(self.retry.on) as e:
+                                if not is_retryable_exception(e, self.retry):
+                                    raise
+                                attempt += 1
+                                if attempt >= self.retry.attempts:
+                                    raise
+                                time.sleep(resolve_delay(self.retry, attempt, extract_response(e)))
 
-                part_path.replace(target)
-                state_path.unlink(missing_ok=True)
-                return target
-        except Timeout as e:
-            raise DownloadLockError(f"Download to {target} is locked by another process") from e
+                    part_path.replace(target)
+                    state_path.unlink(missing_ok=True)
+                    return target
+            except Timeout as e:
+                raise DownloadLockError(f"Download to {target} is locked by another process") from e
 
 
 class AsyncDownloader(msgspec.Struct, frozen=True):
@@ -215,6 +223,7 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
     spec: RequestSpec
     retry: Retry
     ratelimit: RateLimit | None = None
+    concurrency: Concurrency | None = None
 
     async def __call__(
         self,
@@ -233,56 +242,62 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
         import anyio
         from filelock import AsyncFileLock, Timeout
 
-        target = anyio.Path(path)
-        part_path = target.with_name(target.name + ".part")
-        state_path = target.with_name(target.name + ".part.json")
-        lock_path = target.with_name(target.name + ".part.lock")
-        try:
-            async with AsyncFileLock(lock_path, timeout=0, fallback_to_soft=False):
-                received, validator = await load_resume_state_async(
-                    part_path, state_path, self.spec.url, overwrite=overwrite
-                )
+        async with gate_concurrency_async(self.consumer, self.concurrency):
+            target = anyio.Path(path)
+            part_path = target.with_name(target.name + ".part")
+            state_path = target.with_name(target.name + ".part.json")
+            lock_path = target.with_name(target.name + ".part.lock")
+            try:
+                async with AsyncFileLock(lock_path, timeout=0, fallback_to_soft=False):
+                    received, validator = await load_resume_state_async(
+                        part_path, state_path, self.spec.url, overwrite=overwrite
+                    )
 
-                attempt = 0
-                async with await part_path.open("ab" if received else "wb") as fh:
-                    while True:
-                        await gate_async(self.consumer, self.ratelimit)
-                        kwargs = self.spec.to_kwargs()
-                        kwargs["headers"] = resume_headers(self.spec, received, validator) or None
-                        try:
-                            async with self.consumer.session.stream(
-                                self.spec.method, self.spec.url, **kwargs
-                            ) as response:
-                                apply_streaming_response_handler(self.consumer, response)
-                                if received and response.status_code != HTTPStatus.PARTIAL_CONTENT:
-                                    raise ResumeLostError(
-                                        "server ignored Range or the resource changed"
-                                    )
-                                if validator is None:
-                                    validator = await write_state_async(
-                                        state_path, self.spec.url, response
-                                    )
-                                total = extract_total_size(response, received)
-                                _notify(on_progress, received, total)
-                                async for chunk in response.aiter_bytes():
-                                    await fh.write(chunk)
-                                    received += len(chunk)
-                                    _notify(on_progress, received, total)
-                            await fh.flush()
-                            break
-                        except retryable_exceptions(self.retry.on) as e:
-                            if not is_retryable_exception(e, self.retry):
-                                raise
-                            attempt += 1
-                            if attempt >= self.retry.attempts:
-                                raise
-                            await fh.flush()
-                            await asyncio.sleep(
-                                resolve_delay(self.retry, attempt, extract_response(e))
+                    attempt = 0
+                    async with await part_path.open("ab" if received else "wb") as fh:
+                        while True:
+                            await gate_async(self.consumer, self.ratelimit)
+                            kwargs = self.spec.to_kwargs()
+                            kwargs["headers"] = (
+                                resume_headers(self.spec, received, validator) or None
                             )
+                            try:
+                                async with self.consumer.session.stream(
+                                    self.spec.method, self.spec.url, **kwargs
+                                ) as response:
+                                    apply_streaming_response_handler(self.consumer, response)
+                                    if (
+                                        received
+                                        and response.status_code != HTTPStatus.PARTIAL_CONTENT
+                                    ):
+                                        raise ResumeLostError(
+                                            "server ignored Range or the resource changed"
+                                        )
+                                    if validator is None:
+                                        validator = await write_state_async(
+                                            state_path, self.spec.url, response
+                                        )
+                                    total = extract_total_size(response, received)
+                                    _notify(on_progress, received, total)
+                                    async for chunk in response.aiter_bytes():
+                                        await fh.write(chunk)
+                                        received += len(chunk)
+                                        _notify(on_progress, received, total)
+                                await fh.flush()
+                                break
+                            except retryable_exceptions(self.retry.on) as e:
+                                if not is_retryable_exception(e, self.retry):
+                                    raise
+                                attempt += 1
+                                if attempt >= self.retry.attempts:
+                                    raise
+                                await fh.flush()
+                                await asyncio.sleep(
+                                    resolve_delay(self.retry, attempt, extract_response(e))
+                                )
 
-                await part_path.replace(target)
-                await state_path.unlink(missing_ok=True)
-                return Path(path)
-        except Timeout as e:
-            raise DownloadLockError(f"Download to {target} is locked by another process") from e
+                    await part_path.replace(target)
+                    await state_path.unlink(missing_ok=True)
+                    return Path(path)
+            except Timeout as e:
+                raise DownloadLockError(f"Download to {target} is locked by another process") from e

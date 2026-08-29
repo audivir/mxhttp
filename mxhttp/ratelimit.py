@@ -6,9 +6,10 @@ import asyncio
 import threading
 import time
 from typing import TYPE_CHECKING, TypeAlias
-from urllib.parse import urlsplit
 
 import msgspec
+
+from mxhttp.parse import host_port
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -65,13 +66,6 @@ def get_window(host: str, port: int, config: RateLimit) -> Window:
             window = Window()
             windows[key] = window
         return window
-
-
-def host_port(url: str) -> tuple[str, int]:
-    """Extracts the `(host, port)` pair a rate limit is scoped to, defaulting the port by scheme."""
-    parts = urlsplit(url)
-    port = parts.port or (443 if parts.scheme == "https" else 80)
-    return parts.hostname or "", port
 
 
 def wait_time(window: Window, config: RateLimit) -> float:

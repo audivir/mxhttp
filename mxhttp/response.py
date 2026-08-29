@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
     import httpx
 
+    from mxhttp.concurrency import Concurrency
     from mxhttp.consumer import AsyncConsumer, BaseConsumer, SyncConsumer
     from mxhttp.request import RequestSpec
     from mxhttp.retry import Retry
@@ -135,24 +136,38 @@ def streaming_response_handler(
     return decorate
 
 
-def stream_sync(self: SyncConsumer, spec: RequestSpec) -> Iterator[bytes]:
+def stream_sync(
+    self: SyncConsumer, spec: RequestSpec, concurrency: Concurrency | None = None
+) -> Iterator[bytes]:
     """Streams the response body in chunks instead of buffering it.
 
     Runs the `@streaming_response_handler` hook before yielding events.
     Discards any incomplete event when the stream ends.
     """
-    with self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response:
+    from mxhttp.concurrency import gate_concurrency_sync
+
+    with (
+        gate_concurrency_sync(self, concurrency),
+        self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response,
+    ):
         apply_streaming_response_handler(self, response)
         yield from response.iter_bytes()
 
 
-async def stream_async(self: AsyncConsumer, spec: RequestSpec) -> AsyncIterator[bytes]:
+async def stream_async(
+    self: AsyncConsumer, spec: RequestSpec, concurrency: Concurrency | None = None
+) -> AsyncIterator[bytes]:
     """Streams the response body in chunks instead of buffering it.
 
     Runs the `@streaming_response_handler` hook before yielding events.
     Discards any incomplete event when the stream ends.
     """
-    async with self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response:
+    from mxhttp.concurrency import gate_concurrency_async
+
+    async with (
+        gate_concurrency_async(self, concurrency),
+        self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response,
+    ):
         apply_streaming_response_handler(self, response)
         async for chunk in response.aiter_bytes():
             yield chunk
@@ -168,7 +183,12 @@ def resume_headers(spec: RequestSpec, received: int, validator: str | None) -> d
     return headers
 
 
-def resumable_stream_sync(self: SyncConsumer, spec: RequestSpec, config: Retry) -> Iterator[bytes]:
+def resumable_stream_sync(
+    self: SyncConsumer,
+    spec: RequestSpec,
+    config: Retry,
+    concurrency: Concurrency | None = None,
+) -> Iterator[bytes]:
     """Streams the response body, reconnecting with `Range` on a transport error mid-stream.
 
     Runs the `@streaming_response_handler` hook once per (re)connect.
@@ -177,36 +197,42 @@ def resumable_stream_sync(self: SyncConsumer, spec: RequestSpec, config: Retry) 
         ResumeLostError: If a reconnect gets a full (`200`) body instead of a partial (`206`) one,
             meaning the server ignored `Range` or the resource changed underneath the download.
     """
-    received = 0
-    validator: str | None = None
-    attempt = 0
-    while True:
-        kwargs = spec.to_kwargs()
-        kwargs["headers"] = resume_headers(spec, received, validator) or None
-        try:
-            with self.session.stream(spec.method, spec.url, **kwargs) as response:
-                apply_streaming_response_handler(self, response)
-                if received and response.status_code != HTTPStatus.PARTIAL_CONTENT:
-                    raise ResumeLostError("server ignored Range or the resource changed")
-                if validator is None:
-                    validator = response.headers.get("etag") or response.headers.get(
-                        "last-modified"
-                    )
-                for chunk in response.iter_bytes():
-                    received += len(chunk)
-                    yield chunk
-                return
-        except retryable_exceptions(config.on) as exc:
-            if not is_retryable_exception(exc, config):
-                raise
-            attempt += 1
-            if attempt >= config.attempts:
-                raise
-            time.sleep(resolve_delay(config, attempt, extract_response(exc)))
+    from mxhttp.concurrency import gate_concurrency_sync
+
+    with gate_concurrency_sync(self, concurrency):
+        received = 0
+        validator: str | None = None
+        attempt = 0
+        while True:
+            kwargs = spec.to_kwargs()
+            kwargs["headers"] = resume_headers(spec, received, validator) or None
+            try:
+                with self.session.stream(spec.method, spec.url, **kwargs) as response:
+                    apply_streaming_response_handler(self, response)
+                    if received and response.status_code != HTTPStatus.PARTIAL_CONTENT:
+                        raise ResumeLostError("server ignored Range or the resource changed")
+                    if validator is None:
+                        validator = response.headers.get("etag") or response.headers.get(
+                            "last-modified"
+                        )
+                    for chunk in response.iter_bytes():
+                        received += len(chunk)
+                        yield chunk
+                    return
+            except retryable_exceptions(config.on) as exc:
+                if not is_retryable_exception(exc, config):
+                    raise
+                attempt += 1
+                if attempt >= config.attempts:
+                    raise
+                time.sleep(resolve_delay(config, attempt, extract_response(exc)))
 
 
 async def resumable_stream_async(
-    self: AsyncConsumer, spec: RequestSpec, config: Retry
+    self: AsyncConsumer,
+    spec: RequestSpec,
+    config: Retry,
+    concurrency: Concurrency | None = None,
 ) -> AsyncIterator[bytes]:
     """Streams the response body, reconnecting with `Range` on a transport error mid-stream.
 
@@ -216,59 +242,72 @@ async def resumable_stream_async(
         ResumeLostError: If a reconnect gets a full (`200`) body instead of a partial (`206`) one,
             meaning the server ignored `Range` or the resource changed underneath the download.
     """
-    received = 0
-    validator: str | None = None
-    attempt = 0
-    while True:
-        kwargs = spec.to_kwargs()
-        kwargs["headers"] = resume_headers(spec, received, validator) or None
-        try:
-            async with self.session.stream(spec.method, spec.url, **kwargs) as response:
-                apply_streaming_response_handler(self, response)
-                if received and response.status_code != HTTPStatus.PARTIAL_CONTENT:
-                    raise ResumeLostError("server ignored Range or the resource changed")
-                if validator is None:
-                    validator = response.headers.get("etag") or response.headers.get(
-                        "last-modified"
-                    )
-                async for chunk in response.aiter_bytes():
-                    received += len(chunk)
-                    yield chunk
-                return
-        except retryable_exceptions(config.on) as exc:
-            if not is_retryable_exception(exc, config):
-                raise
-            attempt += 1
-            if attempt >= config.attempts:
-                raise
-            await asyncio.sleep(resolve_delay(config, attempt, extract_response(exc)))
+    from mxhttp.concurrency import gate_concurrency_async
+
+    async with gate_concurrency_async(self, concurrency):
+        received = 0
+        validator: str | None = None
+        attempt = 0
+        while True:
+            kwargs = spec.to_kwargs()
+            kwargs["headers"] = resume_headers(spec, received, validator) or None
+            try:
+                async with self.session.stream(spec.method, spec.url, **kwargs) as response:
+                    apply_streaming_response_handler(self, response)
+                    if received and response.status_code != HTTPStatus.PARTIAL_CONTENT:
+                        raise ResumeLostError("server ignored Range or the resource changed")
+                    if validator is None:
+                        validator = response.headers.get("etag") or response.headers.get(
+                            "last-modified"
+                        )
+                    async for chunk in response.aiter_bytes():
+                        received += len(chunk)
+                        yield chunk
+                    return
+            except retryable_exceptions(config.on) as exc:
+                if not is_retryable_exception(exc, config):
+                    raise
+                attempt += 1
+                if attempt >= config.attempts:
+                    raise
+                await asyncio.sleep(resolve_delay(config, attempt, extract_response(exc)))
 
 
-def sse_sync(self: SyncConsumer, spec: RequestSpec) -> Iterator[Event]:
+def sse_sync(
+    self: SyncConsumer, spec: RequestSpec, concurrency: Concurrency | None = None
+) -> Iterator[Event]:
     """Streams the response as parsed Server-Sent Events.
 
     Runs the `@streaming_response_handler` hook before yielding events.
     Discards any incomplete event when the stream ends.
     """
-    builder = SseBuilder()
-    with self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response:
-        apply_streaming_response_handler(self, response)
-        for line in response.iter_lines():
-            event = builder.feed(line)
-            if event is not None:
-                yield event
+    from mxhttp.concurrency import gate_concurrency_sync
+
+    with gate_concurrency_sync(self, concurrency):
+        builder = SseBuilder()
+        with self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response:
+            apply_streaming_response_handler(self, response)
+            for line in response.iter_lines():
+                event = builder.feed(line)
+                if event is not None:
+                    yield event
 
 
-async def sse_async(self: AsyncConsumer, spec: RequestSpec) -> AsyncIterator[Event]:
+async def sse_async(
+    self: AsyncConsumer, spec: RequestSpec, concurrency: Concurrency | None = None
+) -> AsyncIterator[Event]:
     """Streams the response as parsed Server-Sent Events.
 
     Runs the `@streaming_response_handler` hook before yielding events.
     Discards any incomplete event when the stream ends.
     """
-    builder = SseBuilder()
-    async with self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response:
-        apply_streaming_response_handler(self, response)
-        async for line in response.aiter_lines():
-            event = builder.feed(line)
-            if event is not None:
-                yield event
+    from mxhttp.concurrency import gate_concurrency_async
+
+    async with gate_concurrency_async(self, concurrency):
+        builder = SseBuilder()
+        async with self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response:
+            apply_streaming_response_handler(self, response)
+            async for line in response.aiter_lines():
+                event = builder.feed(line)
+                if event is not None:
+                    yield event
