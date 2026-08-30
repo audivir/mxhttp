@@ -50,13 +50,13 @@ class CallTimeOverrideApi(SyncConsumer):
 def test_headers_property_returns_class_default() -> None:
     consumer = StaticHeadersApi()
 
-    assert consumer.headers == {"X-Api-Version": "2"}
+    assert consumer._class_endpoint_kwargs["headers"] == {"X-Api-Version": "2"}  # noqa: SLF001
 
 
 def test_headers_property_defaults_to_none() -> None:
     consumer = SyncConsumer()
 
-    assert consumer.headers is None
+    assert consumer._class_endpoint_kwargs.get("headers") is None  # noqa: SLF001
 
 
 def test_static_headers_sent_on_every_call() -> None:

@@ -64,13 +64,13 @@ class OverrideParamApi(SyncConsumer):
 def test_cookies_property_returns_class_default() -> None:
     consumer = StaticCookiesApi()
 
-    assert consumer.cookies == {"tenant": "acme"}
+    assert consumer._class_endpoint_kwargs["cookies"] == {"tenant": "acme"}  # noqa: SLF001
 
 
 def test_cookies_property_defaults_to_none() -> None:
     consumer = SyncConsumer()
 
-    assert consumer.cookies is None
+    assert consumer._class_endpoint_kwargs.get("cookies") is None  # noqa: SLF001
 
 
 def test_static_cookies_sent_on_every_call() -> None:

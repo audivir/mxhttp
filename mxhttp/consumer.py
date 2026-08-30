@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import urllib.parse
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from typing_extensions import Self, override
 
@@ -13,11 +13,7 @@ if TYPE_CHECKING:
 
     import httpx
 
-    from mxhttp.concurrency import Concurrency
-    from mxhttp.cookies import CookiesInput
-    from mxhttp.headers import HeadersInput
-    from mxhttp.ratelimit import RateLimit
-    from mxhttp.retry import Retry
+    from mxhttp.endpoint import ResolvedEndpointKwargs
     from mxhttp.types import AnyC_T, ResponseHandler
 
 
@@ -47,11 +43,7 @@ class BaseConsumer:
     _base_url: str | None = None
     _response_handler: ResponseHandler | None = None
     _streaming_response_handler: ResponseHandler | None = None
-    _retry: Retry | None = None
-    _ratelimit: RateLimit | None = None
-    _concurrency: Concurrency | None = None
-    _headers: HeadersInput | None = None
-    _cookies: CookiesInput | None = None
+    _class_endpoint_kwargs: ClassVar[ResolvedEndpointKwargs] = {}
 
     def __init__(
         self,
@@ -89,21 +81,6 @@ class BaseConsumer:
     def base_url(self) -> str | None:
         """The base URL configured for the consumer class."""
         return self._base_url
-
-    @property
-    def concurrency(self) -> Concurrency | None:
-        """The concurrency configuration for the consumer class."""
-        return self._concurrency
-
-    @property
-    def headers(self) -> HeadersInput | None:
-        """The default headers configuration for the consumer class."""
-        return self._headers
-
-    @property
-    def cookies(self) -> CookiesInput | None:
-        """The default cookies configuration for the consumer class."""
-        return self._cookies
 
     @property
     def session(self) -> httpx.Client | httpx.AsyncClient:

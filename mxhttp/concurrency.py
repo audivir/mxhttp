@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 
     import anyio
 
-    from mxhttp.consumer import BaseConsumer
     from mxhttp.types import AnyC_T
 
 
@@ -50,7 +49,7 @@ def concurrency(
     resolved = Concurrency(limit=config) if isinstance(config, int) else config
 
     def decorate(cls: type[AnyC_T]) -> type[AnyC_T]:
-        cls._concurrency = resolved
+        cls._class_endpoint_kwargs = {**cls._class_endpoint_kwargs, "concurrency": resolved}
         return cls
 
     return decorate
@@ -62,6 +61,7 @@ sync_semaphores: dict[SemaphoreKey, threading.BoundedSemaphore] = {}
 sync_semaphores_guard = threading.Lock()
 
 async_semaphores: dict[SemaphoreKey, anyio.Semaphore] = {}
+async_semaphores_guard = threading.Lock()
 
 
 def get_sync_semaphore(host: str, port: int, config: Concurrency) -> threading.BoundedSemaphore:
@@ -80,11 +80,12 @@ def get_async_semaphore(host: str, port: int, config: Concurrency) -> anyio.Sema
     import anyio
 
     key: SemaphoreKey = (host, port, config.key, config.limit)
-    sem = async_semaphores.get(key)
-    if sem is None:
-        sem = anyio.Semaphore(config.limit)
-        async_semaphores[key] = sem
-    return sem
+    with async_semaphores_guard:
+        sem = async_semaphores.get(key)
+        if sem is None:
+            sem = anyio.Semaphore(config.limit)
+            async_semaphores[key] = sem
+        return sem
 
 
 class SyncConcurrencyContext:
@@ -193,20 +194,20 @@ NOOP_ASYNC = NoopAsyncContext()
 
 
 def gate_concurrency_sync(
-    self: BaseConsumer, config: Concurrency | None
+    url: str | None, config: Concurrency | None
 ) -> AbstractContextManager[None]:
-    """Applies concurrency limits to the current sync call."""
+    """Applies concurrency limits to the current sync call, keyed by the host `url` targets."""
     if config is None:
         return NOOP_SYNC
-    host, port = host_port(self.base_url or "")
+    host, port = host_port(url or "")
     return SyncConcurrencyContext(get_sync_semaphore(host, port, config), config)
 
 
 def gate_concurrency_async(
-    self: BaseConsumer, config: Concurrency | None
+    url: str | None, config: Concurrency | None
 ) -> AbstractAsyncContextManager[None]:
-    """Applies concurrency limits to the current async call."""
+    """Applies concurrency limits to the current async call, keyed by the host `url` targets."""
     if config is None:
         return NOOP_ASYNC
-    host, port = host_port(self.base_url or "")
+    host, port = host_port(url or "")
     return AsyncConcurrencyContext(get_async_semaphore(host, port, config), config)

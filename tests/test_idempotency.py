@@ -105,8 +105,11 @@ def test_idempotent_rejects_non_post_put_methods() -> None:
 
 
 def test_get_does_not_expose_idempotent() -> None:
-    with pytest.raises(TypeError, match=r"unexpected keyword argument 'idempotent'"):
-        get("/items", idempotent=True)  # type: ignore[call-arg]
+    with pytest.raises(TypeError, match=r"idempotent is only valid for POST/PUT endpoints"):
+
+        class BadApi(SyncConsumer):
+            @get("/items", idempotent=True)  # type: ignore[call-arg]
+            def list_items(self) -> Item: ...  # type: ignore[empty-body]
 
 
 def test_header_rejects_idempotency_key_wire_name() -> None:

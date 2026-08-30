@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from attrs import AttrsInstance
 
     from mxhttp.consumer import AsyncConsumer, BaseConsumer, SyncConsumer  # cyclic
+    from mxhttp.request import RequestSpec  # cyclic
 
 
 class Missing(Enum):
@@ -72,6 +73,7 @@ QueryValue: TypeAlias = "ParamValue | Sequence[ParamValue]"
 """A `ParamValue` scalar or a sequence of those, repeated as `key=a&key=b&...`."""
 
 ResponseHandler: TypeAlias = "Callable[[httpx.Response], httpx.Response]"
+RequestHandler: TypeAlias = "Callable[[RequestSpec], RequestSpec]"
 
 
 def is_parsed_type(return_type: type[Parsed_T | None]) -> TypeIs[type[Parsed_T]]:

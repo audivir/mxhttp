@@ -40,6 +40,9 @@ if TYPE_CHECKING:
     import httpx
     from _typeshed import StrPath
 
+DOWNLOAD_DEFAULT_RETRY = Retry(attempts=5, max_delay=60.0)
+"""Fallback retry budget for `Downloader`/`AsyncDownloader` when `resumable` isn't given."""
+
 ProgressCallback: TypeAlias = "Callable[[int, int | None], None]"
 PartProgressCallback: TypeAlias = "Callable[[int, int, int], None]"
 
@@ -282,7 +285,7 @@ class Downloader(msgspec.Struct, frozen=True):
         """
         from filelock import FileLock, Timeout
 
-        with gate_concurrency_sync(self.consumer, self.concurrency):
+        with gate_concurrency_sync(self.spec.url, self.concurrency):
             target = Path(path)
             part_path, state_path, lock_path = part_paths(target)
             try:
@@ -342,7 +345,7 @@ class Downloader(msgspec.Struct, frozen=True):
         attempt = 0
         with part_path.open("ab" if received else "wb") as fh:
             while True:
-                gate_sync(self.consumer, self.ratelimit)
+                gate_sync(self.spec.url, self.ratelimit)
                 kwargs = self.spec.to_kwargs()
                 kwargs["headers"] = resume_headers(self.spec, received, validator) or None
                 try:
@@ -406,7 +409,7 @@ class Downloader(msgspec.Struct, frozen=True):
 
         if saved_state is None:
             cleanup_staging_files(target)
-            gate_sync(self.consumer, self.ratelimit)
+            gate_sync(self.spec.url, self.ratelimit)
             probe_kwargs = self.spec.to_kwargs()
             probe_headers = dict(probe_kwargs.get("headers") or {})
             probe_headers["Range"] = "bytes=0-0"
@@ -497,7 +500,7 @@ class Downloader(msgspec.Struct, frozen=True):
 
             attempt = 0
             while True:
-                gate_sync(self.consumer, self.ratelimit)
+                gate_sync(self.spec.url, self.ratelimit)
                 part_kwargs = self.spec.to_kwargs()
                 range_start = part_info.start + part_info.received
                 part_headers = resume_headers(self.spec, range_start, validator) or {}
@@ -619,7 +622,7 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
         import anyio
         from filelock import AsyncFileLock, Timeout
 
-        async with gate_concurrency_async(self.consumer, self.concurrency):
+        async with gate_concurrency_async(self.spec.url, self.concurrency):
             target = anyio.Path(path)
             part_path = target.with_name(target.name + ".part")
             state_path = target.with_name(target.name + ".part.json")
@@ -681,7 +684,7 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
         attempt = 0
         async with await part_path.open("ab" if received else "wb") as fh:
             while True:
-                await gate_async(self.consumer, self.ratelimit)
+                await gate_async(self.spec.url, self.ratelimit)
                 kwargs = self.spec.to_kwargs()
                 kwargs["headers"] = resume_headers(self.spec, received, validator) or None
                 try:
@@ -697,11 +700,11 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                         notify(on_progress, received, total)
                         async for chunk in response.aiter_bytes():
                             await fh.write(chunk)
+                            await fh.flush()
                             if hasher is not None:
                                 hasher.update(chunk)
                             received += len(chunk)
                             notify(on_progress, received, total)
-                    await fh.flush()
                     break
                 except retryable_exceptions(self.retry.on) as e:
                     if not is_retryable_exception(e, self.retry):
@@ -749,7 +752,7 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
 
         if saved_state is None:
             await cleanup_staging_files_async(target)
-            await gate_async(self.consumer, self.ratelimit)
+            await gate_async(self.spec.url, self.ratelimit)
             probe_kwargs = self.spec.to_kwargs()
             probe_headers = dict(probe_kwargs.get("headers") or {})
             probe_headers["Range"] = "bytes=0-0"
@@ -849,7 +852,7 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
 
             attempt = 0
             while True:
-                await gate_async(self.consumer, self.ratelimit)
+                await gate_async(self.spec.url, self.ratelimit)
                 part_kwargs = self.spec.to_kwargs()
                 range_start = part_info.start + part_info.received
                 part_headers = resume_headers(self.spec, range_start, validator) or {}
@@ -868,6 +871,7 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                         async with await seg_path.open("ab" if part_info.received else "wb") as sfh:
                             async for chunk in resp.aiter_bytes():
                                 await sfh.write(chunk)
+                                await sfh.flush()
                                 part_info.received += len(chunk)
                                 received_per_part[part_idx] = part_info.received
                                 current_total = sum(received_per_part)
@@ -881,7 +885,6 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                                     current_total,
                                     total_size,
                                 )
-                            await sfh.flush()
                     return
                 except retryable_exceptions(self.retry.on) as e:
                     if not is_retryable_exception(e, self.retry):

@@ -34,7 +34,8 @@ def headers(config: HeadersInput) -> Callable[[type[AnyC_T]], type[AnyC_T]]:
         # A plain callable stored as a class attribute is auto-bound as a method when read via
         # `self._headers`, which would pass `self` twice once `resolve_headers()` calls it.
         # `staticmethod` prevents that binding while still reading back as the plain callable.
-        cls._headers = staticmethod(config) if callable(config) else config
+        resolved_config = staticmethod(config) if callable(config) else config
+        cls._class_endpoint_kwargs = {**cls._class_endpoint_kwargs, "headers": resolved_config}
         return cls
 
     return decorate

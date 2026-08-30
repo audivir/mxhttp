@@ -32,12 +32,13 @@ from mxhttp.headers import HeadersInput, headers
 from mxhttp.markers import Body, Cookie, Field, Header, Part, Path, Query, RawBody, RawPath
 from mxhttp.progress import TqdmProgress
 from mxhttp.ratelimit import RateLimit, RateLimitExceededError, ratelimit
+from mxhttp.request import RequestSpec, request_handler
 from mxhttp.response import Response, ResumeLostError, response_handler, streaming_response_handler
 from mxhttp.retry import Retry, retry
 from mxhttp.sse import Event
 from mxhttp.types import PartValue
 
-__version__ = "1.6.4"
+__version__ = "1.7.0"
 
 __all__ = [
     "KNOWN_ALGORITHMS",
@@ -72,6 +73,7 @@ __all__ = [
     "RateLimitExceededError",
     "RawBody",
     "RawPath",
+    "RequestSpec",
     "Response",
     "ResumeLostError",
     "Retry",
@@ -89,6 +91,7 @@ __all__ = [
     "post",
     "put",
     "ratelimit",
+    "request_handler",
     "response_handler",
     "retry",
     "streaming_response_handler",

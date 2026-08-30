@@ -1550,28 +1550,19 @@ async def test_endpoint_level_checksum_configuration(
 
 
 def test_endpoint_checksum_validation_errors() -> None:
-    from mxhttp.endpoint import validate_endpoint_kinds
+    from mxhttp.endpoint import EndpointConfiguration
+
+    conf = EndpointConfiguration(
+        is_raw_stream=False,
+        is_sse_stream=False,
+        is_downloader=False,
+        is_async_downloader=False,
+        has_cookies=False,
+        is_coroutine=False,
+    )
 
     with pytest.raises(TypeError, match="checksum is only valid for GET endpoints"):
-        validate_endpoint_kinds(
-            "POST",
-            None,
-            None,
-            checksum="sha256",
-            is_raw_stream=False,
-            is_downloader=False,
-            is_async_downloader=False,
-            is_coroutine=False,
-        )
+        conf.validate("POST", None, None, checksum="sha256")
 
     with pytest.raises(TypeError, match="checksum is only valid for Downloader/AsyncDownloader"):
-        validate_endpoint_kinds(
-            "GET",
-            None,
-            None,
-            checksum="sha256",
-            is_raw_stream=False,
-            is_downloader=False,
-            is_async_downloader=False,
-            is_coroutine=False,
-        )
+        conf.validate("GET", None, None, checksum="sha256")

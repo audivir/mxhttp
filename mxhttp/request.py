@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from inspect import Parameter
 
     from mxhttp.parse import ParsedPath
+    from mxhttp.types import RequestHandler
 P = ParamSpec("P")
 
 
@@ -93,6 +94,23 @@ class RequestSpec(msgspec.Struct):
             "json": self.json,
             "content": self.content,
         }
+
+
+def request_handler(hook: RequestHandler) -> Callable[[type[AnyC_T]], type[AnyC_T]]:
+    """Class decorator that runs every built request through `hook` before it is sent.
+
+    Runs once per call, before `@retry` starts resending the request, so every retry attempt of
+    one call reuses the same request that `hook` returned.
+    """
+
+    def decorate(cls: type[AnyC_T]) -> type[AnyC_T]:
+        cls._class_endpoint_kwargs = {
+            **cls._class_endpoint_kwargs,
+            "request_handler": staticmethod(hook),
+        }
+        return cls
+
+    return decorate
 
 
 def scalar_str(value: object) -> str:

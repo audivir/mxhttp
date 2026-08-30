@@ -140,7 +140,7 @@ def retry(config: Retry) -> Callable[[type[AnyC_T]], type[AnyC_T]]:
     """Class decorator that retries failed requests according to `config`."""
 
     def decorate(cls: type[AnyC_T]) -> type[AnyC_T]:
-        cls._retry = config
+        cls._class_endpoint_kwargs = {**cls._class_endpoint_kwargs, "retry": config}
         return cls
 
     return decorate

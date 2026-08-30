@@ -54,16 +54,16 @@ def test_concurrency_class_decorator() -> None:
     @concurrency(3)
     class ConsumerA(SyncConsumer): ...
 
-    assert ConsumerA._concurrency == Concurrency(limit=3)  # noqa: SLF001
+    assert ConsumerA._class_endpoint_kwargs["concurrency"] == Concurrency(limit=3)  # noqa: SLF001
     consumer_a = ConsumerA()
-    assert consumer_a.concurrency == Concurrency(limit=3)
+    assert consumer_a._class_endpoint_kwargs["concurrency"] == Concurrency(limit=3)  # noqa: SLF001
 
     @concurrency(Concurrency(limit=2, timeout=1.0))
     class ConsumerB(SyncConsumer): ...
 
-    assert ConsumerB._concurrency == Concurrency(limit=2, timeout=1.0)  # noqa: SLF001
+    assert ConsumerB._class_endpoint_kwargs["concurrency"] == Concurrency(limit=2, timeout=1.0)  # noqa: SLF001
     consumer_b = ConsumerB()
-    assert consumer_b.concurrency == Concurrency(limit=2, timeout=1.0)
+    assert consumer_b._class_endpoint_kwargs["concurrency"] == Concurrency(limit=2, timeout=1.0)  # noqa: SLF001
 
 
 @base_url("https://api.example.com")
@@ -469,13 +469,11 @@ async def test_async_downloader_gated_by_concurrency(tmp_path: Path) -> None:
 
 
 def test_noop_concurrency_contexts() -> None:
-    client = SyncConsumer()
-    with gate_concurrency_sync(client, None):
+    with gate_concurrency_sync(None, None):
         pass
 
     async def run_async() -> None:
-        async_client = AsyncConsumer()
-        async with gate_concurrency_async(async_client, None):
+        async with gate_concurrency_async(None, None):
             pass
 
     asyncio.run(run_async())

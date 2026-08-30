@@ -137,7 +137,9 @@ def streaming_response_handler(
 
 
 def stream_sync(
-    self: SyncConsumer, spec: RequestSpec, concurrency: Concurrency | None = None
+    self: SyncConsumer,
+    spec: RequestSpec,
+    concurrency: Concurrency | None = None,
 ) -> Iterator[bytes]:
     """Streams the response body in chunks instead of buffering it.
 
@@ -147,7 +149,7 @@ def stream_sync(
     from mxhttp.concurrency import gate_concurrency_sync
 
     with (
-        gate_concurrency_sync(self, concurrency),
+        gate_concurrency_sync(spec.url, concurrency),
         self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response,
     ):
         apply_streaming_response_handler(self, response)
@@ -155,7 +157,9 @@ def stream_sync(
 
 
 async def stream_async(
-    self: AsyncConsumer, spec: RequestSpec, concurrency: Concurrency | None = None
+    self: AsyncConsumer,
+    spec: RequestSpec,
+    concurrency: Concurrency | None = None,
 ) -> AsyncIterator[bytes]:
     """Streams the response body in chunks instead of buffering it.
 
@@ -165,7 +169,7 @@ async def stream_async(
     from mxhttp.concurrency import gate_concurrency_async
 
     async with (
-        gate_concurrency_async(self, concurrency),
+        gate_concurrency_async(spec.url, concurrency),
         self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response,
     ):
         apply_streaming_response_handler(self, response)
@@ -199,7 +203,7 @@ def resumable_stream_sync(
     """
     from mxhttp.concurrency import gate_concurrency_sync
 
-    with gate_concurrency_sync(self, concurrency):
+    with gate_concurrency_sync(spec.url, concurrency):
         received = 0
         validator: str | None = None
         attempt = 0
@@ -244,7 +248,7 @@ async def resumable_stream_async(
     """
     from mxhttp.concurrency import gate_concurrency_async
 
-    async with gate_concurrency_async(self, concurrency):
+    async with gate_concurrency_async(spec.url, concurrency):
         received = 0
         validator: str | None = None
         attempt = 0
@@ -274,7 +278,9 @@ async def resumable_stream_async(
 
 
 def sse_sync(
-    self: SyncConsumer, spec: RequestSpec, concurrency: Concurrency | None = None
+    self: SyncConsumer,
+    spec: RequestSpec,
+    concurrency: Concurrency | None = None,
 ) -> Iterator[Event]:
     """Streams the response as parsed Server-Sent Events.
 
@@ -283,7 +289,7 @@ def sse_sync(
     """
     from mxhttp.concurrency import gate_concurrency_sync
 
-    with gate_concurrency_sync(self, concurrency):
+    with gate_concurrency_sync(spec.url, concurrency):
         builder = SseBuilder()
         with self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response:
             apply_streaming_response_handler(self, response)
@@ -294,7 +300,9 @@ def sse_sync(
 
 
 async def sse_async(
-    self: AsyncConsumer, spec: RequestSpec, concurrency: Concurrency | None = None
+    self: AsyncConsumer,
+    spec: RequestSpec,
+    concurrency: Concurrency | None = None,
 ) -> AsyncIterator[Event]:
     """Streams the response as parsed Server-Sent Events.
 
@@ -303,7 +311,7 @@ async def sse_async(
     """
     from mxhttp.concurrency import gate_concurrency_async
 
-    async with gate_concurrency_async(self, concurrency):
+    async with gate_concurrency_async(spec.url, concurrency):
         builder = SseBuilder()
         async with self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response:
             apply_streaming_response_handler(self, response)

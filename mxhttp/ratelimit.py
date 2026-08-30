@@ -14,7 +14,6 @@ from mxhttp.parse import host_port
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mxhttp.consumer import BaseConsumer
     from mxhttp.types import AnyC_T
 
 
@@ -85,7 +84,7 @@ def ratelimit(config: RateLimit) -> Callable[[type[AnyC_T]], type[AnyC_T]]:
     """Class decorator that limits outbound requests to `config.calls` per `config.period`."""
 
     def decorate(cls: type[AnyC_T]) -> type[AnyC_T]:
-        cls._ratelimit = config
+        cls._class_endpoint_kwargs = {**cls._class_endpoint_kwargs, "ratelimit": config}
         return cls
 
     return decorate
@@ -117,13 +116,13 @@ async def acquire_async(config: RateLimit, base_url: str | None) -> None:
     await asyncio.sleep(delay)
 
 
-def gate_sync(self: BaseConsumer, config: RateLimit | None) -> None:
-    """Applies `config` to the current call, if a rate limit is configured."""
+def gate_sync(url: str | None, config: RateLimit | None) -> None:
+    """Applies `config` to the current call, keyed by the actual host `url` targets."""
     if config is not None:
-        acquire_sync(config, self.base_url)
+        acquire_sync(config, url)
 
 
-async def gate_async(self: BaseConsumer, config: RateLimit | None) -> None:
-    """Applies `config` to the current call, if a rate limit is configured."""
+async def gate_async(url: str | None, config: RateLimit | None) -> None:
+    """Applies `config` to the current call, keyed by the actual host `url` targets."""
     if config is not None:
-        await acquire_async(config, self.base_url)
+        await acquire_async(config, url)

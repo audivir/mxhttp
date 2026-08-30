@@ -198,6 +198,26 @@ class Shop(SyncConsumer): ...
 
 The `@response_handler` hook runs on buffered responses before decoding. For streaming and SSE endpoints, `@streaming_response_handler` inspects the initial status line and headers before chunks or events are yielded.
 
+### Request handling
+
+`@request_handler` runs every built request through a hook just before it is sent, for cross-cutting concerns like signing or tracing that would otherwise need repeating in every endpoint:
+
+```python
+from mxhttp import RequestSpec, SyncConsumer, request_handler
+
+
+def sign(spec: RequestSpec) -> RequestSpec:
+    spec.headers = {**(spec.headers or {}), "X-Signature": compute_signature(spec)}
+    return spec
+
+
+@request_handler(sign)
+class Shop(SyncConsumer): ...
+```
+
+- Runs once per call, before `@retry` starts resending the request, so every retry attempt of one call reuses the same request the hook returned.
+- Pass `request_handler=` directly to `@get`/`@post`/etc. to override the class-level hook for that one endpoint, or `request_handler=None` to disable it for that endpoint only.
+
 ### Retries
 
 Configure automatic retries with exponential backoff via `@retry` on the class, so individual endpoints do not need to hand-roll a retry loop:
