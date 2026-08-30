@@ -150,6 +150,33 @@ class Uploads(SyncConsumer):
 - `Content-Type` cannot be set through a `Header` parameter, since it is reserved to `RawBody` (see the marker table above).
 - `RawBody` cannot be combined with `Body`, `Field`, or `Part` on the same endpoint, since a request can only have one body encoding.
 
+### Dynamic parameter bags
+
+`Query`, `Field`, `Header`, and `Cookie` also accept a `dict[str, ...] | None` parameter as a "bag" of keys that are only known at call time, instead of one fixed wire name per parameter:
+
+```python
+class Shop(SyncConsumer):
+    @get("/items/{item_id}")
+    def get_item(
+        self,
+        item_id: int,
+        extra_headers: Annotated[dict[str, str] | None, Header] = None,
+        extra_query: Annotated[dict[str, str | list[str]] | None, Query] = None,
+    ) -> Item: ...  # type: ignore[empty-body]
+
+
+shop.get_item(item_id=7, extra_headers={"X-Trace-Id": "abc123"}, extra_query={"tag": ["a", "b"]})
+```
+
+- `Query` and `Field` bag values may be a scalar or a `Sequence` (rendered as a repeated key), the same as their named-parameter form. `Header` and `Cookie` bag values are scalar-only, also matching their named-parameter form.
+- `None` for the whole bag sends no extra entries. `None` for one bag key omits just that key.
+- At most one bag per kind (`Header`, `Query`, `Field`, `Cookie`) per endpoint, but one of each kind can coexist on the same endpoint.
+- Bracket syntax (`Header["x"]`) is rejected on a bag: a bag has no single wire slot to rebind.
+- A bag key colliding with a named parameter, a static inline query value, or another already-set key raises `ValueError` at call time, regardless of whether the two values are equal, so a call is never silently ambiguous about which value wins.
+- A `Header` bag entry keyed `Content-Type` or `Cookie` (any casing) raises `ValueError`, same as a named `Header` parameter.
+- A `Cookie` bag respects the jar the same way a named `Cookie` parameter does: the jar wins for every key the bag contributes, unless the bag itself is declared `Cookie(override=True)`, in which case the bag wins for every key.
+- There is no `Path` bag: every path segment is a fixed, required placeholder from the URL template, so there is no "extra" segment for a bag to add.
+
 ### Response handling
 
 By default, every response is checked by `response.raise_for_status()` before decoding, so errors during the request raise `httpx.HTTPStatusError` automatically. This behavior can be overridden by `@response_handler` and `@streaming_response_handler` class decorators.

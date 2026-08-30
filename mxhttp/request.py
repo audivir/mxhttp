@@ -33,6 +33,7 @@ from mxhttp.markers import (
     Query,
     RawBody,
     RawPath,
+    is_scalar_mapping,
     unwrap_optional,
 )
 from mxhttp.response import Response
@@ -56,6 +57,7 @@ class ParamPlan(msgspec.Struct):
     raw_path: bool = False
     raw_body: bool = False
     raw_body_content_type: str | None = None
+    is_bag: bool = False
 
 
 class RequestKwargs(TypedDict):
@@ -100,6 +102,18 @@ def scalar_str(value: object) -> str:
     return str(value)
 
 
+def insert_unique(target: dict[str, Any], key: str, value: object, kind: str) -> None:
+    """Inserts `value` at `key`, raising if another parameter or bag entry already set it.
+
+    Two independent sources (a named parameter, a bag entry, or a static inline-query value)
+    targeting the same wire key is treated as a bug regardless of whether the two values happen
+    to be equal, so this never silently overwrites.
+    """
+    if key in target:
+        raise ValueError(f"{kind} key {key!r} is set by more than one parameter or bag entry")
+    target[key] = value
+
+
 def unwrap_hint(hint: type | None) -> tuple[type | None, bool, list[object]]:
     """Unwraps nested `Optional` and `Annotated` layers in any order.
 
@@ -126,12 +140,13 @@ def unwrap_hint(hint: type | None) -> tuple[type | None, bool, list[object]]:
 
 def resolve_inline_query(
     marker: Query, name: str, resolved_hint: type | None, inline_query_names: Mapping[str, str]
-) -> tuple[str, Marker] | None:
+) -> tuple[str, Marker, bool] | None:
     """Resolves an explicit `Query[...]` marker against an inline query field, if it names one.
 
     Returns:
-        The resolved `(wire_name, marker)` pair, or `None` if the marker does not name an inline
-        query field.
+        The resolved `(wire_name, marker, is_bag)` triple, or `None` if the marker does not name
+        an inline query field. `is_bag` is always `False`: an inline query field has exactly one
+        wire slot, the placeholder itself, so it can never be a bag.
 
     Raises:
         TypeError: If the marker targets the wire name of an inline field directly instead of its
@@ -139,8 +154,8 @@ def resolve_inline_query(
     """
     lookup_name = marker.name or name
     if lookup_name in inline_query_names:
-        marker.validate(name, resolved_hint, allow_sequence=False)
-        return (inline_query_names[lookup_name], marker)
+        marker.validate(name, resolved_hint, allow_sequence=False, allow_mapping=False)
+        return (inline_query_names[lookup_name], marker, False)
     if lookup_name in inline_query_names.values():
         raise TypeError(
             f"Query argument {name!r} targets wire name {lookup_name!r} directly"
@@ -155,8 +170,13 @@ def classify(  # noqa: C901
     path_parts: Collection[str],
     inline_query_names: Mapping[str, str],
     param: Parameter,
-) -> tuple[str, Marker | type[Body] | RawBody]:
-    """Resolves the binding of a parameter via an explicit marker or implicit path/inline query."""
+) -> tuple[str, Marker | type[Body] | RawBody, bool]:
+    """Resolves the binding of a parameter via an explicit marker or implicit path/inline query.
+
+    Returns:
+        The wire name, the resolved marker (or `Body`/`RawBody`), and whether the parameter is a
+        bag (a `Mapping`-typed `Query`/`Field`/`Header`/`Cookie` parameter with dynamic keys).
+    """
     resolved_hint, is_optional, markers = unwrap_hint(hint)
     for extra in markers:  # pragma: no branch
         marker = (
@@ -179,20 +199,23 @@ def classify(  # noqa: C901
         if isinstance(marker, (Query, Field, Header, Cookie, Part)):
             marker.validate(name, resolved_hint)
         if isinstance(marker, Marker):
-            return (marker.name or name, marker)
+            is_bag = isinstance(marker, (Query, Field, Header, Cookie)) and is_scalar_mapping(
+                resolved_hint, allow_sequence=isinstance(marker, (Query, Field))
+            )
+            return (marker.name or name, marker, is_bag)
         if isinstance(marker, RawBody):
             RawBody.validate(name, resolved_hint)
-            return (name, marker)
+            return (name, marker, False)
         if extra is Body:
             Body.validate(name, resolved_hint)
-            return (name, Body)
+            return (name, Body, False)
         raise TypeError(f"Unexpected extra: {extra}")
     if name in inline_query_names:
-        Query.validate(name, resolved_hint, allow_sequence=False)
-        return (inline_query_names[name], Query())
+        Query().validate(name, resolved_hint, allow_sequence=False, allow_mapping=False)
+        return (inline_query_names[name], Query(), False)
     if name in path_parts:
         Path.validate(name, resolved_hint, is_optional, param)
-        return (name, Path())
+        return (name, Path(), False)
     raise TypeError(f"Parameter {name!r} has no Query/Field/Part/Body binding or path match")
 
 
@@ -230,6 +253,7 @@ def build_plan(  # noqa: C901, PLR0912, PLR0915
         "header": set(),
         "cookie": set(),
     }
+    bags_seen: dict[Param_T, str] = {}
     body_group: str | None = None
     body_owner: str = ""
     body_owner_label: str = ""
@@ -237,7 +261,7 @@ def build_plan(  # noqa: C901, PLR0912, PLR0915
     for py_name, param in sig.parameters.items():
         if py_name == "self":
             continue
-        wire_name, marker = classify(
+        wire_name, marker, is_bag = classify(
             py_name, hints.get(py_name), path_parts, parsed.inline_query_names, param
         )
         if marker is Body or isinstance(marker, RawBody):
@@ -254,7 +278,14 @@ def build_plan(  # noqa: C901, PLR0912, PLR0915
             kind = "cookie"
         else:
             kind = "part"
-        if kind in wire_names_seen:
+        if is_bag:
+            if kind in bags_seen:
+                raise TypeError(
+                    f"Parameter {py_name!r} is a second {kind} bag; {bags_seen[kind]!r} is "
+                    f"already bound as the {kind} bag for this endpoint"
+                )
+            bags_seen[kind] = py_name
+        elif kind in wire_names_seen:
             if wire_name in wire_names_seen[kind]:
                 if kind == "query" and wire_name in parsed.static_query:
                     raise TypeError(
@@ -292,6 +323,7 @@ def build_plan(  # noqa: C901, PLR0912, PLR0915
                 raw_path=isinstance(marker, RawPath),
                 raw_body=isinstance(marker, RawBody),
                 raw_body_content_type=marker.content_type if isinstance(marker, RawBody) else None,
+                is_bag=is_bag,
             )
         )
     bound_path_names = {p.wire_name for p in plan if p.kind == "path"}
@@ -311,7 +343,7 @@ def join_url(base_url: str | None, path: str) -> str:
     return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
 
-def build_request(  # noqa: C901, PLR0912, PLR0913, PLR0917
+def build_request(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     method: str,
     parsed: ParsedPath,
     plan: list[ParamPlan],
@@ -344,17 +376,38 @@ def build_request(  # noqa: C901, PLR0912, PLR0913, PLR0917
             (raw_path_args if p.raw_path else path_args)[p.wire_name] = value
         elif value is None:
             continue  # None values are omitted for queries, fields, headers, and cookies
+        elif p.is_bag:
+            for key, val in value.items():  # type: ignore[attr-defined]
+                if val is None:
+                    continue  # None omits this one bag entry, same as an ordinary None value
+                if p.kind == "header" and key.lower() in Header.RESERVED_WIRE_NAMES:
+                    raise ValueError(
+                        f"Header bag entry {key!r} cannot bind reserved wire name "
+                        f"{key.lower()!r}: use RawBody(content_type=...) for Content-Type, or "
+                        "the Cookie marker for Cookie"
+                    )
+                if p.kind == "query":
+                    insert_unique(params, key, val, "query")
+                elif p.kind == "field":
+                    insert_unique(fields, key, val, "field")
+                elif p.kind == "header":
+                    insert_unique(headers, key, scalar_str(val), "header")
+                else:  # cookie
+                    jar_value = None if p.cookie_override else (jar or {}).get(key)
+                    cookie_val = jar_value if jar_value is not None else scalar_str(val)
+                    insert_unique(cookies, key, cookie_val, "cookie")
         elif p.kind == "query":
-            params[p.wire_name] = value  # type: ignore[assignment]
+            insert_unique(params, p.wire_name, value, "query")
         elif p.kind == "field":
-            fields[p.wire_name] = value
+            insert_unique(fields, p.wire_name, value, "field")
         elif p.kind == "part":
             files[p.wire_name] = value  # type: ignore[assignment]
         elif p.kind == "header":
-            headers[p.wire_name] = scalar_str(value)
+            insert_unique(headers, p.wire_name, scalar_str(value), "header")
         elif p.kind == "cookie":
             jar_value = None if p.cookie_override else (jar or {}).get(p.wire_name)
-            cookies[p.wire_name] = jar_value if jar_value is not None else scalar_str(value)
+            cookie_val = jar_value if jar_value is not None else scalar_str(value)
+            insert_unique(cookies, p.wire_name, cookie_val, "cookie")
         elif p.raw_body:
             if not isinstance(value, (bytes, str)):  # pragma: no cover
                 raise TypeError(f"RawBody argument {p.py_name!r} must be bytes | str")

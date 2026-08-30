@@ -48,16 +48,48 @@ def is_scalar_sequence(hint: type | None) -> bool:
     return bool(item_types) and all(is_valid_scalar(a, ParamValue) for a in item_types)
 
 
+def is_scalar_mapping(hint: type | None, *, allow_sequence: bool = False) -> bool:
+    """Checks whether `hint` is a `dict`/`Mapping` of `str` keys to scalar `ParamValue` values.
+
+    A value may itself be `| None` (an individual bag entry omits its key at call time, mirroring
+    how `None` already omits an ordinary optional parameter). When `allow_sequence` is set, a
+    value may also be (or include, in a union) a `Sequence[ParamValue]`, mirroring the equivalent
+    named parameter's repeated-key handling.
+    """
+    if get_origin(hint) not in (dict, Mapping):
+        return False
+    args = get_args(hint)
+    if len(args) != 2 or args[0] is not str:  # noqa: PLR2004
+        return False
+    value_type = args[1]
+    if get_origin(value_type) in (Union, UnionType):
+        candidates = [a for a in get_args(value_type) if a is not type(None)]
+    else:
+        candidates = [value_type]
+    return bool(candidates) and all(
+        is_valid_scalar(c, ParamValue) or (allow_sequence and is_scalar_sequence(c))
+        for c in candidates
+    )
+
+
 def validate_scalar_arg(
-    py_name: str, scalar_type: type | None, marker_name: str, *, allow_sequence: bool = False
+    py_name: str,
+    scalar_type: type | None,
+    marker_name: str,
+    *,
+    allow_sequence: bool = False,
+    allow_mapping: bool = True,
 ) -> None:
-    """Verifies that `Query`, `Field`, `Header`, or `Cookie` arguments have a scalar type."""
+    """Verifies that a `Query`/`Field`/`Header`/`Cookie` argument is scalar, sequence, or bag."""
     if allow_sequence and is_scalar_sequence(scalar_type):
         return
+    if allow_mapping and is_scalar_mapping(scalar_type, allow_sequence=allow_sequence):
+        return
     if not is_valid_scalar(scalar_type, ParamValue):
-        allowed = "str | int | float | bool"
+        value = "str | int | float | bool"
         if allow_sequence:
-            allowed += " | Sequence[str | int | float | bool]"
+            value += " | Sequence[str | int | float | bool]"
+        allowed = value if not allow_mapping else f"{value} | Mapping[str, {value}]"
         raise TypeError(f"{marker_name} argument {py_name!r} must be {allowed}")
 
 
@@ -151,15 +183,35 @@ class RawPath(Path):
             raise TypeError(f"RawPath argument {py_name!r} must not be optional")
 
 
+def reject_bag_bracket(marker: Marker, name: str, resolved_hint: type | None) -> None:
+    """Raises `TypeError` if a bracket-renamed marker (`marker.name` set) is bound to a bag."""
+    if marker.name is not None and is_scalar_mapping(resolved_hint, allow_sequence=True):
+        raise TypeError(
+            f"{type(marker).__name__} argument {name!r} is a bag (Mapping) and cannot use "
+            "bracket syntax to rebind a wire name: a bag has no single wire slot to rebind"
+        )
+
+
 class Query(Marker):
     """Binds a parameter to a URL query string parameter, omitting `None` values."""
 
-    @classmethod
     def validate(
-        cls, name: str, resolved_hint: type | None, *, allow_sequence: bool = True
+        self,
+        name: str,
+        resolved_hint: type | None,
+        *,
+        allow_sequence: bool = True,
+        allow_mapping: bool = True,
     ) -> None:
-        """Verifies that a `Query` argument is a scalar or a sequence of scalars."""
-        validate_scalar_arg(name, resolved_hint, cls.__name__, allow_sequence=allow_sequence)
+        """Verifies that a `Query` argument is a scalar, a sequence, or a bag."""
+        validate_scalar_arg(
+            name,
+            resolved_hint,
+            type(self).__name__,
+            allow_sequence=allow_sequence,
+            allow_mapping=allow_mapping,
+        )
+        reject_bag_bracket(self, name, resolved_hint)
 
 
 class Field(Marker):
@@ -169,10 +221,10 @@ class Field(Marker):
     parameter, in which case the whole body becomes multipart instead.
     """
 
-    @classmethod
-    def validate(cls, name: str, resolved_hint: type | None) -> None:
-        """Verifies that a `Field` argument is a scalar or a sequence of scalars."""
-        validate_scalar_arg(name, resolved_hint, cls.__name__, allow_sequence=True)
+    def validate(self, name: str, resolved_hint: type | None) -> None:
+        """Verifies that a `Field` argument is a scalar, a sequence, or a bag of those."""
+        validate_scalar_arg(name, resolved_hint, type(self).__name__, allow_sequence=True)
+        reject_bag_bracket(self, name, resolved_hint)
 
 
 class Part(Marker):
@@ -204,7 +256,7 @@ class Header(Marker):
     """Wire names mxhttp manages itself and never accepts through a `Header` parameter."""
 
     def validate(self, name: str, resolved_hint: type | None) -> None:
-        """Verifies that a `Header` argument is a scalar, not reserved, and not a sequence."""
+        """Verifies that a `Header` argument is a scalar or bag, not reserved, not a sequence."""
         wire_name = (self.name or name).lower()
         if wire_name in self.RESERVED_WIRE_NAMES:
             raise TypeError(
@@ -212,13 +264,15 @@ class Header(Marker):
                 "use RawBody(content_type=...) for Content-Type, or the Cookie marker for Cookie"
             )
         validate_scalar_arg(name, resolved_hint, type(self).__name__)
+        reject_bag_bracket(self, name, resolved_hint)
 
 
 class Cookie(Marker):
     """Binds a parameter to a request cookie, omitting `None` values.
 
     If the cookie jar already holds a cookie with this name, the jar value is sent
-    instead of this parameter value, unless `override=True` is set.
+    instead of this parameter value, unless `override=True` is set. For a bag (see the module
+    docstring), `override` applies uniformly to every key the bag contributes.
     """
 
     __slots__ = ("override",)
@@ -228,10 +282,10 @@ class Cookie(Marker):
         super().__init__(name)
         self.override = override
 
-    @classmethod
-    def validate(cls, name: str, resolved_hint: type | None) -> None:
-        """Verifies that a `Cookie` argument is a scalar and not a sequence."""
-        validate_scalar_arg(name, resolved_hint, cls.__name__)
+    def validate(self, name: str, resolved_hint: type | None) -> None:
+        """Verifies that a `Cookie` argument is a scalar or bag, not a sequence."""
+        validate_scalar_arg(name, resolved_hint, type(self).__name__)
+        reject_bag_bracket(self, name, resolved_hint)
 
 
 class Body:
