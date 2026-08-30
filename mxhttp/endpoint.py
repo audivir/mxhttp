@@ -49,6 +49,16 @@ if TYPE_CHECKING:
 
 P = ParamSpec("P")
 
+DOWNLOAD_DEFAULT_RETRY = Retry(attempts=5, max_delay=60.0)
+"""Fallback retry budget for `Downloader`/`AsyncDownloader` when `resumable` isn't given.
+
+Higher than the generic per-request `Retry()` default (3 attempts, 30s max delay): with `parts=`,
+several segments retry independently against the same host, so a transient rate limit is far more
+likely to be re-tripped by a sibling segment mid-backoff than it would be for a single ordinary
+request. More attempts and a longer ceiling give the whole download more headroom to outlast a
+shared limit before any one segment exhausts its budget and aborts the rest via the task group.
+"""
+
 
 class EndpointDecorator(Protocol):
     """Interface for sync/async return invariants based on the context type."""
@@ -176,8 +186,8 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
         resumable: Reconnects with `Range` (using this `Retry` for reconnect attempts and
             backoff) if the connection drops mid-stream. Only valid for `GET` endpoints
             returning `Iterator[bytes]`/`AsyncIterator[bytes]`/`Downloader`/`AsyncDownloader`.
-            For `Downloader`/`AsyncDownloader`, defaults to `Retry()` rather than disabling
-            reconnects, since resumability is the entire point of that return type.
+            For `Downloader`/`AsyncDownloader`, defaults to `DOWNLOAD_DEFAULT_RETRY` rather than
+            disabling reconnects, since resumability is the entire point of that return type.
         base_url: Overrides the class-level base URL for this endpoint only.
         concurrency: Overrides the class-level `Concurrency` config for this endpoint only.
             Pass `None` explicitly to disable concurrency limits for this endpoint only.
@@ -289,7 +299,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
                     return AsyncDownloader(
                         self,
                         spec,
-                        resumable or Retry(),
+                        resumable or DOWNLOAD_DEFAULT_RETRY,
                         resolve_ratelimit(self),
                         resolve_concurrency(self),
                         resolve_parts(parts),
@@ -348,7 +358,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
                 return Downloader(
                     self,
                     spec,
-                    resumable or Retry(),
+                    resumable or DOWNLOAD_DEFAULT_RETRY,
                     resolve_ratelimit(self),
                     resolve_concurrency(self),
                     resolve_parts(parts),

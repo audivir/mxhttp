@@ -414,6 +414,7 @@ path = downloader(
 - Pass `parts=` on the downloader call `downloader(path, parts=8)` to override endpoint defaults at runtime.
 - Pass `on_part_progress=` to receive slice-level updates `(part_index, received_bytes, total_bytes)` for each worker.
 - Pass `on_progress=TqdmProgress(desc="Downloading", per_part=True)` to render an overall progress bar together with individual sub-bars for each active part.
+- Each segment retries independently against the same host, so more parts means more chances to re-trigger a rate limit than a single ordinary request would. Without `resumable=`, `Downloader`/`AsyncDownloader` default to a larger retry budget than other endpoints for this reason (5 attempts, 60s max delay). If the target host still throttles under load, pair `parts=` with `@ratelimit`/`@concurrency` (or their per-endpoint `ratelimit=`/`concurrency=` overrides) to cap how hard the segments hit it concurrently, rather than relying on retries alone to outlast the limit.
 
 #### Checksum verification
 

@@ -115,6 +115,13 @@ class MultiPartDownloadApi(SyncConsumer):
     @get("/files/{file_id}", parts=2)
     def download_int_parts(self, file_id: int) -> Downloader: ...  # type: ignore[empty-body]
 
+    @get(
+        "/files/{file_id}",
+        parts=Parts(count=2, min_part_size=10),
+        resumable=Retry(attempts=3, backoff=0.05, jitter=False),
+    )
+    def download_fast_retry(self, file_id: int) -> Downloader: ...  # type: ignore[empty-body]
+
 
 class AsyncMultiPartDownloadApi(AsyncConsumer):
     @get("/files/{file_id}", parts=Parts(count=2, min_part_size=10))
@@ -122,6 +129,13 @@ class AsyncMultiPartDownloadApi(AsyncConsumer):
 
     @get("/files/{file_id}", parts=2)
     async def download_int_parts(self, file_id: int) -> AsyncDownloader: ...  # type: ignore[empty-body]
+
+    @get(
+        "/files/{file_id}",
+        parts=Parts(count=2, min_part_size=10),
+        resumable=Retry(attempts=3, backoff=0.05, jitter=False),
+    )
+    async def download_fast_retry(self, file_id: int) -> AsyncDownloader: ...  # type: ignore[empty-body]
 
 
 def test_download_rejects_non_get_methods() -> None:
@@ -1010,11 +1024,11 @@ async def test_multipart_download_exceeds_retry_attempts(
     consumer = make_consumer(cls, handler)
     target = tmp_path / "exceed_retry.bin"
     if isinstance(consumer, AsyncMultiPartDownloadApi):
-        async_dl = await consumer.download(file_id=1)
+        async_dl = await consumer.download_fast_retry(file_id=1)
         with pytest.raises(Exception, match=r"503|HTTPStatusError|TaskGroup"):
             await async_dl(target)
     else:
-        sync_dl = consumer.download(file_id=1)
+        sync_dl = consumer.download_fast_retry(file_id=1)
         with pytest.raises(httpx.HTTPStatusError):
             sync_dl(target)
 
