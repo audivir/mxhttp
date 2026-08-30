@@ -60,12 +60,15 @@ The method body is never run as it is replaced by the decorator. Parameters are 
 | `Header` | HTTP Header | Must be `str`, `int`, `float`, or `bool`, but no list of those. |
 | `Cookie` | Cookie | Is superseded by the cookie jar of the client if it already has a same-named cookie, unless `override=True` is set. Accepts same types as `Header`. |
 | `Body` | JSON Body | Whole object, serialized with `msgspec.to_builtins`. Cannot be a scalar type. |
+| `RawBody` | Raw Body | `bytes` or `str`, sent unencoded. See "Raw request bodies" below. |
 
 - Use `Path["name"]`, `Query["name"]`, `Field["name"]`, `Header["name"]`, or `Cookie["name"]` to bind under a different name than the parameter (for example reserved `from`, a header like `X-Request-Id`, or unsupported string format arguments).
 - `None`-valued `Query`, `Field`, `Header`, and `Cookie` parameters are omitted from the request.
 - `Path` parameters cannot be optional as a placeholder cannot be omitted from the URL.
 - Mismatched marker and type combinations raise a `TypeError` as soon as the class body runs, not at call time.
 - `Literal[...]` and `Enum` types are accepted where scalar types are (`Path`, `Query`, `Field`, `Header`, `Cookie`). Every literal value or enum member value must be `str`, `int`, or `float` (plus `bool` outside of `Path`). `Enum` members are serialized by their `.value`.
+- `Header` rejects `Content-Type` and `Cookie` as wire names (any casing), since mxhttp manages both itself: `Content-Type` through `RawBody`, and `Cookie` through the `Cookie` marker and cookie jar.
+- An endpoint can only have one body encoding: `Body` and `RawBody` cannot be combined with each other or with `Field`/`Part`. `Field` and `Part` can still be combined with each other. Any conflicting combination raises a `TypeError` as soon as the class body runs.
 
 ### Base URL
 
@@ -123,6 +126,29 @@ The return type defines the response decoding:
 - Plain `attrs` classes are decoded by `msgspec`. For type hinting, `attrs` is needed as a dependency.
 
 For an async client, subclass `AsyncConsumer` and declare the methods `async def`. Everything else stays the same.
+
+### Raw request bodies
+
+Annotate a parameter with `RawBody` to send `bytes` or `str` as the request body unencoded, instead of JSON:
+
+```python
+from mxhttp import RawBody, SyncConsumer, post
+
+
+class BulkImport(SyncConsumer):
+    @post("/items/import")
+    def import_xml(self, payload: Annotated[bytes, RawBody("application/xml")]) -> Item: ...  # type: ignore[empty-body]
+
+
+class Uploads(SyncConsumer):
+    @post("/blobs")
+    def upload(self, payload: Annotated[bytes, RawBody]) -> Item: ...  # type: ignore[empty-body]
+```
+
+- Used bare (`RawBody`), no `Content-Type` header is sent.
+- `RawBody("application/xml")` or `RawBody(content_type="application/xml")` sets a fixed `Content-Type` for that endpoint.
+- `Content-Type` cannot be set through a `Header` parameter, since it is reserved to `RawBody` (see the marker table above).
+- `RawBody` cannot be combined with `Body`, `Field`, or `Part` on the same endpoint, since a request can only have one body encoding.
 
 ### Response handling
 

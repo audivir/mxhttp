@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from enum import Enum
 from types import UnionType
-from typing import TYPE_CHECKING, Literal, Union, get_args, get_origin
+from typing import TYPE_CHECKING, ClassVar, Literal, Union, get_args, get_origin
 
 from typing_extensions import Self, override
 
@@ -200,10 +200,18 @@ class Part(Marker):
 class Header(Marker):
     """Binds a parameter to an HTTP request header and omits `None` values."""
 
-    @classmethod
-    def validate(cls, name: str, resolved_hint: type | None) -> None:
-        """Verifies that a `Header` argument is a scalar and not a sequence."""
-        validate_scalar_arg(name, resolved_hint, cls.__name__)
+    RESERVED_WIRE_NAMES: ClassVar[frozenset[str]] = frozenset({"content-type", "cookie"})
+    """Wire names mxhttp manages itself and never accepts through a `Header` parameter."""
+
+    def validate(self, name: str, resolved_hint: type | None) -> None:
+        """Verifies that a `Header` argument is a scalar, not reserved, and not a sequence."""
+        wire_name = (self.name or name).lower()
+        if wire_name in self.RESERVED_WIRE_NAMES:
+            raise TypeError(
+                f"Header argument {name!r} cannot bind reserved wire name {wire_name!r}: "
+                "use RawBody(content_type=...) for Content-Type, or the Cookie marker for Cookie"
+            )
+        validate_scalar_arg(name, resolved_hint, type(self).__name__)
 
 
 class Cookie(Marker):
@@ -236,3 +244,19 @@ class Body:
             raise TypeError(
                 f"Body argument {py_name!r} must not be str | int | float | bool | bytes"
             )
+
+
+class RawBody:
+    """Binds a raw bytes/str parameter as the request body, sent unencoded."""
+
+    __slots__ = ("content_type",)
+
+    def __init__(self, content_type: str | None = None) -> None:
+        """Initializes the marker with an optional fixed Content-Type value."""
+        self.content_type = content_type
+
+    @staticmethod
+    def validate(py_name: str, body_type: type | None) -> None:
+        """Verifies that a `RawBody` argument is bytes or str."""
+        if body_type not in (bytes, str):
+            raise TypeError(f"RawBody argument {py_name!r} must be bytes | str")

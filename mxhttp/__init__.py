@@ -27,7 +27,7 @@ from mxhttp.download import (
     ProgressCallback,
 )
 from mxhttp.endpoint import delete, endpoint, get, head, patch, post, put
-from mxhttp.markers import Body, Cookie, Field, Header, Part, Path, Query, RawPath
+from mxhttp.markers import Body, Cookie, Field, Header, Part, Path, Query, RawBody, RawPath
 from mxhttp.progress import TqdmProgress
 from mxhttp.ratelimit import RateLimit, RateLimitExceededError, ratelimit
 from mxhttp.response import Response, ResumeLostError, response_handler, streaming_response_handler
@@ -35,7 +35,7 @@ from mxhttp.retry import Retry, retry
 from mxhttp.sse import Event
 from mxhttp.types import PartValue
 
-__version__ = "1.6.3"
+__version__ = "1.6.4"
 
 __all__ = [
     "KNOWN_ALGORITHMS",
@@ -66,6 +66,7 @@ __all__ = [
     "Query",
     "RateLimit",
     "RateLimitExceededError",
+    "RawBody",
     "RawPath",
     "Response",
     "ResumeLostError",

@@ -31,6 +31,7 @@ from mxhttp.markers import (
     Part,
     Path,
     Query,
+    RawBody,
     RawPath,
     unwrap_optional,
 )
@@ -53,6 +54,8 @@ class ParamPlan(msgspec.Struct):
     kind: Param_T
     cookie_override: bool = False
     raw_path: bool = False
+    raw_body: bool = False
+    raw_body_content_type: str | None = None
 
 
 class RequestKwargs(TypedDict):
@@ -63,6 +66,7 @@ class RequestKwargs(TypedDict):
     data: dict[str, object] | None
     files: dict[str, PartValue] | None
     json: JsonValue
+    content: bytes | str | None
 
 
 class RequestSpec(msgspec.Struct):
@@ -75,6 +79,7 @@ class RequestSpec(msgspec.Struct):
     data: dict[str, object] | None = None
     files: dict[str, PartValue] | None = None
     json: JsonValue = None
+    content: bytes | str | None = None
 
     def to_kwargs(self) -> RequestKwargs:
         """Builds the keyword arguments shared by every `session.request`/`session.stream` call."""
@@ -84,6 +89,7 @@ class RequestSpec(msgspec.Struct):
             "data": self.data,
             "files": self.files,
             "json": self.json,
+            "content": self.content,
         }
 
 
@@ -149,11 +155,15 @@ def classify(  # noqa: C901
     path_parts: Collection[str],
     inline_query_names: Mapping[str, str],
     param: Parameter,
-) -> tuple[str, Marker | type[Body]]:
+) -> tuple[str, Marker | type[Body] | RawBody]:
     """Resolves the binding of a parameter via an explicit marker or implicit path/inline query."""
     resolved_hint, is_optional, markers = unwrap_hint(hint)
     for extra in markers:  # pragma: no branch
-        marker = extra() if extra in (Path, RawPath, Query, Field, Part, Header, Cookie) else extra
+        marker = (
+            extra()
+            if extra in (Path, RawPath, Query, Field, Part, Header, Cookie, RawBody)
+            else extra
+        )
         if isinstance(marker, Path):
             lookup_name = marker.name or name
             if lookup_name not in path_parts:
@@ -170,6 +180,9 @@ def classify(  # noqa: C901
             marker.validate(name, resolved_hint)
         if isinstance(marker, Marker):
             return (marker.name or name, marker)
+        if isinstance(marker, RawBody):
+            RawBody.validate(name, resolved_hint)
+            return (name, marker)
         if extra is Body:
             Body.validate(name, resolved_hint)
             return (name, Body)
@@ -193,7 +206,7 @@ def rejects_union(return_type: type) -> bool:
     return False
 
 
-def build_plan(  # noqa: C901, PLR0912
+def build_plan(  # noqa: C901, PLR0912, PLR0915
     func: Callable[Concatenate[AnyC_T, P], Parsed_T]
     | Callable[Concatenate[AnyC_T, P], Coroutine[Any, Any, Parsed_T]],
     parsed: ParsedPath,
@@ -217,6 +230,9 @@ def build_plan(  # noqa: C901, PLR0912
         "header": set(),
         "cookie": set(),
     }
+    body_group: str | None = None
+    body_owner: str = ""
+    body_owner_label: str = ""
     kind: Param_T
     for py_name, param in sig.parameters.items():
         if py_name == "self":
@@ -224,7 +240,7 @@ def build_plan(  # noqa: C901, PLR0912
         wire_name, marker = classify(
             py_name, hints.get(py_name), path_parts, parsed.inline_query_names, param
         )
-        if marker is Body:
+        if marker is Body or isinstance(marker, RawBody):
             kind = "body"
         elif isinstance(marker, Path):
             kind = "path"
@@ -250,6 +266,22 @@ def build_plan(  # noqa: C901, PLR0912
                     "bound by another parameter"
                 )
             wire_names_seen[kind].add(wire_name)
+        if kind in ("body", "field", "part"):
+            group = "body" if kind == "body" else "form"
+            if isinstance(marker, RawBody):
+                label = "RawBody"
+            elif kind == "body":
+                label = "Body"
+            else:
+                label = kind.capitalize()
+            if body_group is not None and (group != body_group or group == "body"):
+                raise TypeError(
+                    f"Parameter {py_name!r} ({label}) cannot be combined with parameter "
+                    f"{body_owner!r} ({body_owner_label}): a request can only have one body "
+                    "encoding"
+                )
+            if body_group is None:
+                body_group, body_owner, body_owner_label = group, py_name, label
         cookie_override = marker.override if isinstance(marker, Cookie) else False
         plan.append(
             ParamPlan(
@@ -258,6 +290,8 @@ def build_plan(  # noqa: C901, PLR0912
                 kind=kind,
                 cookie_override=cookie_override,
                 raw_path=isinstance(marker, RawPath),
+                raw_body=isinstance(marker, RawBody),
+                raw_body_content_type=marker.content_type if isinstance(marker, RawBody) else None,
             )
         )
     bound_path_names = {p.wire_name for p in plan if p.kind == "path"}
@@ -277,7 +311,7 @@ def join_url(base_url: str | None, path: str) -> str:
     return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
 
-def build_request(  # noqa: PLR0913, PLR0917
+def build_request(  # noqa: C901, PLR0912, PLR0913, PLR0917
     method: str,
     parsed: ParsedPath,
     plan: list[ParamPlan],
@@ -303,6 +337,7 @@ def build_request(  # noqa: PLR0913, PLR0917
     fields: dict[str, object] = {}
     files: dict[str, PartValue] = {}
     body: JsonValue = None
+    content: bytes | str | None = None
     for p in plan:
         value = values.get(p.py_name)
         if p.kind == "path":
@@ -320,6 +355,12 @@ def build_request(  # noqa: PLR0913, PLR0917
         elif p.kind == "cookie":
             jar_value = None if p.cookie_override else (jar or {}).get(p.wire_name)
             cookies[p.wire_name] = jar_value if jar_value is not None else scalar_str(value)
+        elif p.raw_body:
+            if not isinstance(value, (bytes, str)):  # pragma: no cover
+                raise TypeError(f"RawBody argument {p.py_name!r} must be bytes | str")
+            content = value
+            if p.raw_body_content_type is not None:
+                headers["Content-Type"] = p.raw_body_content_type
         else:
             body = msgspec.to_builtins(value)
     if cookies:
@@ -338,4 +379,5 @@ def build_request(  # noqa: PLR0913, PLR0917
         data=fields or None,
         files=files or None,
         json=body,
+        content=content,
     )
