@@ -118,7 +118,7 @@ class MultiPartDownloadApi(SyncConsumer):
     @get(
         "/files/{file_id}",
         parts=Parts(count=2, min_part_size=10),
-        resumable=Retry(attempts=3, backoff=0.05, jitter=False),
+        resumable=Retry(attempts=3, backoff=0),
     )
     def download_fast_retry(self, file_id: int) -> Downloader: ...  # type: ignore[empty-body]
 
@@ -133,7 +133,7 @@ class AsyncMultiPartDownloadApi(AsyncConsumer):
     @get(
         "/files/{file_id}",
         parts=Parts(count=2, min_part_size=10),
-        resumable=Retry(attempts=3, backoff=0.05, jitter=False),
+        resumable=Retry(attempts=3, backoff=0),
     )
     async def download_fast_retry(self, file_id: int) -> AsyncDownloader: ...  # type: ignore[empty-body]
 

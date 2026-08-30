@@ -814,7 +814,17 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                 total_size,
             )
 
+        segment_errors: dict[int, BaseException] = {}
+
         async def download_segment_async(part_idx: int) -> None:
+            # A segment that exhausts its retries must not raise directly: raising inside a
+            # `TaskGroup`-spawned task cancels every sibling task immediately, including one
+            # that's mid-write on its own, unrelated segment. With near-zero retry backoff (a
+            # server failing fast on every attempt), that cancellation can land between a
+            # sibling's successful write and its file close, leaking the file handle. Recording
+            # the exception and returning normally lets every segment finish on its own terms;
+            # the first recorded error (by part index, for determinism) is raised once every
+            # segment has already completed cleanly, after the task group below exits.
             part_info = parts_state[part_idx]
             seg_path = target.with_name(f"{target.name}.part.{part_idx}")
             needed = part_info.end - part_info.start + 1
@@ -856,18 +866,23 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                                     total_size,
                                 )
                             await sfh.flush()
-                    break
+                    return
                 except retryable_exceptions(self.retry.on) as e:
                     if not is_retryable_exception(e, self.retry):
-                        raise
+                        segment_errors[part_idx] = e
+                        return
                     attempt += 1
                     if attempt >= self.retry.attempts:
-                        raise
+                        segment_errors[part_idx] = e
+                        return
                     await asyncio.sleep(resolve_delay(self.retry, attempt, extract_response(e)))
 
         async with anyio.create_task_group() as tg:
             for i in range(num_parts):
                 _ = tg.start_soon(download_segment_async, i)
+
+        if segment_errors:
+            raise segment_errors[min(segment_errors)]
 
         hasher = hashlib.new(checksum_config.algorithm) if checksum_config is not None else None
 
