@@ -540,10 +540,26 @@ class Downloader(msgspec.Struct, frozen=True):
                         raise
                     time.sleep(resolve_delay(self.retry, attempt, extract_response(e)))
 
+        segment_errors: dict[int, BaseException] = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_parts) as executor:
-            futures = [executor.submit(download_segment, i) for i in range(num_parts)]
+            futures = {executor.submit(download_segment, i): i for i in range(num_parts)}
+            # `future.exception()` (not `.result()`) so one failed segment doesn't stop us from
+            # checking the rest: threads can't be cancelled anyway, `shutdown(wait=True)` on
+            # exit already blocks for every one of them, so we may as well see every failure
+            # instead of discarding all but whichever future happened to complete first.
             for future in concurrent.futures.as_completed(futures):
-                future.result()
+                exc = future.exception()
+                if exc is not None:
+                    segment_errors[futures[future]] = exc
+
+        if segment_errors:
+            chosen_idx = min(segment_errors)
+            if len(segment_errors) == 1:
+                raise segment_errors[chosen_idx]
+            failed_parts = ", ".join(str(i) for i in sorted(segment_errors))
+            raise segment_errors[chosen_idx] from RuntimeError(
+                f"{len(segment_errors)} of {num_parts} segments failed (parts {failed_parts})"
+            )
 
         hasher = hashlib.new(checksum_config.algorithm) if checksum_config is not None else None
 
@@ -882,7 +898,13 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                 _ = tg.start_soon(download_segment_async, i)
 
         if segment_errors:
-            raise segment_errors[min(segment_errors)]
+            chosen_idx = min(segment_errors)
+            if len(segment_errors) == 1:
+                raise segment_errors[chosen_idx]
+            failed_parts = ", ".join(str(i) for i in sorted(segment_errors))
+            raise segment_errors[chosen_idx] from RuntimeError(
+                f"{len(segment_errors)} of {num_parts} segments failed (parts {failed_parts})"
+            )
 
         hasher = hashlib.new(checksum_config.algorithm) if checksum_config is not None else None
 

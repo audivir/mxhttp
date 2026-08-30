@@ -1036,6 +1036,41 @@ async def test_multipart_download_exceeds_retry_attempts(
 @pytest.mark.parametrize(
     "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
 )
+async def test_multipart_download_reports_how_many_segments_failed(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/20", "ETag": '"v1"'},
+                content=b"0",
+            )
+        # both real segments (bytes=0-9 and bytes=10-19) fail, not just one
+        return httpx.Response(503, headers={"Retry-After": "0"})
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "exceed_both.bin"
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download_fast_retry(file_id=1)
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await async_dl(target)
+    else:
+        sync_dl = consumer.download_fast_retry(file_id=1)
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            sync_dl(target)
+
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, RuntimeError)
+    assert "2 of 2 segments failed" in str(cause)
+    assert "0" in str(cause)
+    assert "1" in str(cause)
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
 async def test_multipart_download_unretryable_part_error(
     tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
 ) -> None:
