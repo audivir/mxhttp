@@ -227,6 +227,22 @@ class Shop(SyncConsumer):
     def create_item(self, item: Annotated[NewItem, Body]) -> Item: ...  # type: ignore[empty-body]
 ```
 
+Pair `@retry` with `idempotent=` on `POST`/`PUT` endpoints so a retried write isn't applied twice server-side:
+
+```python
+class Shop(SyncConsumer):
+    @post("/orders", idempotent=True)
+    def create_order(self, order: Annotated[NewOrder, Body]) -> Order: ...  # type: ignore[empty-body]
+
+    # a custom key generator, called once per call:
+    @put("/items/{item_id}", idempotent=lambda: str(uuid.uuid4()))
+    def replace_item(self, item_id: int, item: Annotated[NewItem, Body]) -> Item: ...  # type: ignore[empty-body]
+```
+
+- `idempotent=True` attaches an `Idempotency-Key: <uuid4>` header. `idempotent=<callable>` calls it with no arguments to produce the key instead. Either way, the key is generated **once per call**, before `@retry` starts resending the request, so every retry attempt of that one call carries the same key — a well-behaved server recognizes the repeat and returns the original result instead of applying the write again. Two separate calls always get different keys.
+- Only valid on `@post`/`@put`; `@get`/`@patch`/`@delete`/`@head` don't accept it at all.
+- `Idempotency-Key` is reserved the same way `Content-Type`/`Cookie` are (see "Raw request bodies" above): it cannot be set through a `Header` parameter, a header bag, or `@headers`.
+
 ### Rate limiting
 
 Configure a maximum call rate with `@ratelimit` on the class, so individual endpoints do not need to hand-roll custom throttling:

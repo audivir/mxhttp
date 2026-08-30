@@ -19,15 +19,16 @@ HeadersInput: TypeAlias = (
 )
 """A value of `None` omits that key, matching every other header/query/field/cookie."""
 
-_RESERVED_HINT = "use RawBody(content_type=...) for Content-Type, or the Cookie marker for Cookie"
-
 
 def headers(config: HeadersInput) -> Callable[[type[AnyC_T]], type[AnyC_T]]:
     """Class decorator setting default headers merged into every request."""
     if not callable(config):
         for key in config:
             if key.lower() in Header.RESERVED_WIRE_NAMES:
-                raise TypeError(f"@headers cannot set reserved key {key!r}: {_RESERVED_HINT}")
+                raise TypeError(
+                    f"@headers cannot set reserved key {key!r}: "
+                    f"{Header.RESERVED_WIRE_HINTS[key.lower()]}"
+                )
 
     def decorate(cls: type[AnyC_T]) -> type[AnyC_T]:
         # A plain callable stored as a class attribute is auto-bound as a method when read via
@@ -49,6 +50,7 @@ def resolve_headers(self: BaseConsumer, config: HeadersInput | None) -> dict[str
         if value is None:  # None omits the key, matching every other header/query/field/cookie
             continue
         if key.lower() in Header.RESERVED_WIRE_NAMES:
-            raise ValueError(f"@headers cannot set reserved key {key!r}: {_RESERVED_HINT}")
+            hint = Header.RESERVED_WIRE_HINTS[key.lower()]
+            raise ValueError(f"@headers cannot set reserved key {key!r}: {hint}")
         out[key] = scalar_str(value)
     return out

@@ -364,6 +364,7 @@ def build_request(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     base_url: str | None = None,
     default_headers: Mapping[str, str] | None = None,
     default_cookies: Mapping[str, str] | None = None,
+    idempotency_key: str | None = None,
 ) -> RequestSpec:
     """Builds a request spec from the parameter plan and provided values.
 
@@ -380,12 +381,16 @@ def build_request(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             cookies, after applying jar precedence (a class default has no per-key override, so
             the jar always wins over it), then overridable (without raising) by exactly one
             named/bag cookie per key.
+        idempotency_key: Resolved `idempotent=` value for this call, or `None` if not configured.
+            Set unconditionally: `Idempotency-Key` is reserved, so nothing else can have set it.
     """
     path_args: dict[str, object] = {}
     raw_path_args: dict[str, object] = {}
     params: dict[str, QueryValue] = dict(parsed.static_query)
     headers: dict[str, str] = dict(default_headers or {})
-    header_defaults = set(headers)
+    if idempotency_key is not None:
+        headers["Idempotency-Key"] = idempotency_key
+    header_defaults = set(default_headers or {})
     cookies: dict[str, str] = {}
     cookie_defaults: set[str] = set()
     for default_key, default_val in (default_cookies or {}).items():
@@ -409,8 +414,7 @@ def build_request(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
                 if p.kind == "header" and key.lower() in Header.RESERVED_WIRE_NAMES:
                     raise ValueError(
                         f"Header bag entry {key!r} cannot bind reserved wire name "
-                        f"{key.lower()!r}: use RawBody(content_type=...) for Content-Type, or "
-                        "the Cookie marker for Cookie"
+                        f"{key.lower()!r}: {Header.RESERVED_WIRE_HINTS[key.lower()]}"
                     )
                 if p.kind == "query":
                     insert_unique(params, key, val, "query")

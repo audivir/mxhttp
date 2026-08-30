@@ -252,7 +252,14 @@ class Part(Marker):
 class Header(Marker):
     """Binds a parameter to an HTTP request header and omits `None` values."""
 
-    RESERVED_WIRE_NAMES: ClassVar[frozenset[str]] = frozenset({"content-type", "cookie"})
+    RESERVED_WIRE_HINTS: ClassVar[dict[str, str]] = {
+        "content-type": "use RawBody(content_type=...) for Content-Type",
+        "cookie": "use the Cookie marker for Cookie",
+        "idempotency-key": "use idempotent=True or idempotent=<callable> on @post/@put",
+    }
+    """Wire names mxhttp manages itself, mapped to a hint pointing at the real mechanism."""
+
+    RESERVED_WIRE_NAMES: ClassVar[frozenset[str]] = frozenset(RESERVED_WIRE_HINTS)
     """Wire names mxhttp manages itself and never accepts through a `Header` parameter."""
 
     def validate(self, name: str, resolved_hint: type | None) -> None:
@@ -261,7 +268,7 @@ class Header(Marker):
         if wire_name in self.RESERVED_WIRE_NAMES:
             raise TypeError(
                 f"Header argument {name!r} cannot bind reserved wire name {wire_name!r}: "
-                "use RawBody(content_type=...) for Content-Type, or the Cookie marker for Cookie"
+                f"{self.RESERVED_WIRE_HINTS[wire_name]}"
             )
         validate_scalar_arg(name, resolved_hint, type(self).__name__)
         reject_bag_bracket(self, name, resolved_hint)

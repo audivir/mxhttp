@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import uuid
 from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
 from typing import (
     TYPE_CHECKING,
@@ -124,13 +125,14 @@ def validate_endpoint_kinds(  # noqa: C901, PLR0912, PLR0913
     resumable: Retry | None,
     parts: int | Parts | None,
     checksum: ChecksumInput = None,
+    idempotent: bool | Callable[[], str] = False,
     *,
     is_raw_stream: bool,
     is_downloader: bool,
     is_async_downloader: bool,
     is_coroutine: bool,
 ) -> None:
-    """Rejects invalid combinations of resumable, Downloader, parts, and checksum."""
+    """Rejects invalid combinations of resumable, Downloader, parts, checksum, and idempotent."""
     if resumable is not None:
         if method != "GET":
             raise TypeError("resumable is only valid for GET endpoints")
@@ -139,6 +141,9 @@ def validate_endpoint_kinds(  # noqa: C901, PLR0912, PLR0913
                 "resumable is only valid for Iterator[bytes]/AsyncIterator[bytes]/"
                 "Downloader/AsyncDownloader endpoints"
             )
+
+    if idempotent is not False and method not in ("POST", "PUT"):
+        raise TypeError("idempotent is only valid for POST/PUT endpoints")
 
     if parts is not None:
         if method != "GET":
@@ -173,6 +178,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
     checksum: ChecksumInput = None,
     headers: HeadersInput | Missing | None = MISSING,
     cookies: CookiesInput | Missing | None = MISSING,
+    idempotent: bool | Callable[[], str] = False,
 ) -> EndpointDecorator:
     """Shared implementation for the HTTP method decorator factories.
 
@@ -199,6 +205,12 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
         cookies: Overrides the class-level `@cookies` default for this endpoint only, replacing
             it outright rather than merging. Pass `None` explicitly to disable it for this
             endpoint only.
+        idempotent: Attaches an `Idempotency-Key` header, stable across `@retry`'s attempts of
+            the same call (generated once per call, before retries begin). `False` (default)
+            attaches nothing. `True` generates a fresh `uuid.uuid4()` per call. A `Callable[[],
+            str]` generates the key itself, called once per call. Only valid for `POST`/`PUT`.
+            `Idempotency-Key` is reserved the same way `Content-Type`/`Cookie` are: it cannot be
+            set through a `Header` parameter, a header bag, or `@headers`.
     """
     if path.startswith(("http://", "https://")):
         if base_url is not MISSING:
@@ -231,6 +243,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
             resumable,
             parts,
             checksum,
+            idempotent,
             is_raw_stream=is_raw_stream,
             is_downloader=is_downloader,
             is_async_downloader=is_async_downloader,
@@ -255,6 +268,16 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
             """Resolves the endpoint cookies override, falling back to the consumer default."""
             return self._cookies if cookies is MISSING else cookies
 
+        def resolve_idempotency_key() -> str | None:
+            """Generates a fresh idempotency key for one call, or `None` if not configured.
+
+            Called once per call, from `resolve_spec()`, before `@retry` starts resending the
+            built `RequestSpec` — so every retry of one call reuses the same key.
+            """
+            if idempotent is False:
+                return None
+            return str(uuid.uuid4()) if idempotent is True else idempotent()
+
         def resolve_spec(self: BaseConsumer, *args: P.args, **kwargs: P.kwargs) -> RequestSpec:
             """Binds call arguments against the stub signature and builds the request spec."""
             bound = sig.bind(self, *args, **kwargs)
@@ -270,6 +293,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
                 base_url=resolve_base_url(self),
                 default_headers=resolve_headers(self, resolve_class_headers(self)),
                 default_cookies=resolve_cookies(self, class_cookies),
+                idempotency_key=resolve_idempotency_key(),
             )
 
         def resolve_retry(self: BaseConsumer) -> Retry | None:
@@ -446,6 +470,7 @@ def post(  # noqa: PLR0913,PLR0917
     concurrency: int | Concurrency | Missing | None = MISSING,
     headers: HeadersInput | Missing | None = MISSING,
     cookies: CookiesInput | Missing | None = MISSING,
+    idempotent: bool | Callable[[], str] = False,
 ) -> EndpointDecorator:
     """Declares a stub method as `POST {path}`."""
     return endpoint(
@@ -457,6 +482,7 @@ def post(  # noqa: PLR0913,PLR0917
         concurrency=concurrency,
         headers=headers,
         cookies=cookies,
+        idempotent=idempotent,
     )
 
 
@@ -468,6 +494,7 @@ def put(  # noqa: PLR0913,PLR0917
     concurrency: int | Concurrency | Missing | None = MISSING,
     headers: HeadersInput | Missing | None = MISSING,
     cookies: CookiesInput | Missing | None = MISSING,
+    idempotent: bool | Callable[[], str] = False,
 ) -> EndpointDecorator:
     """Declares a stub method as `PUT {path}`."""
     return endpoint(
@@ -479,6 +506,7 @@ def put(  # noqa: PLR0913,PLR0917
         concurrency=concurrency,
         headers=headers,
         cookies=cookies,
+        idempotent=idempotent,
     )
 
 
