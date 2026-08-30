@@ -93,6 +93,7 @@ class Api(SyncConsumer):
 - `@base_url` validates that the URL begins with `http://` or `https://`.
 - Pass `base_url=` directly to `@get`/`@post`/etc. to override the base URL for that specific endpoint.
 - Absolute URLs passed to `@get("https://...")` call the full address directly without requiring `@base_url`.
+- Pass `base_url=` to the constructor (`Api(base_url="https://tenant.example.com")`) to set it for that one instance only, overriding `@base_url` for every instance sharing the class. Prefer `@base_url` when every instance shares the same host.
 
 ### Inline query parameters
 
@@ -265,6 +266,50 @@ class Shop(SyncConsumer):
 - By default, requests over the limit block until a slot is released. Set `block=False` to raise `ConcurrencyExceededError` immediately instead, or set `timeout=` to raise `ConcurrencyTimeoutError` if waiting exceeds that duration in seconds.
 - Pass `key="custom_pool"` to `Concurrency` to isolate concurrency quotas between different services or endpoints.
 - Pass `concurrency=` directly to `@get`/`@post`/etc. to override the class configuration for that one endpoint, or `concurrency=None` to disable concurrency limiting for it.
+
+### Default headers
+
+Configure headers sent on every request with `@headers` on the class, instead of repeating an `Annotated[..., Header] = "value"` parameter, with its default, on every stub method:
+
+```python
+from mxhttp import SyncConsumer, get, headers
+
+
+@headers({"X-Api-Version": "2"})
+class Shop(SyncConsumer):
+    @get("/items/{item_id}")
+    def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
+
+
+# a computed value, re-evaluated on every call:
+@headers(lambda self: {"Authorization": f"Bearer {self.token}"})
+class AuthedShop(SyncConsumer):
+    token: str = ""
+```
+
+- `headers()` accepts a static `Mapping[str, str | int | float | bool | None]` or a `Callable[[BaseConsumer], Mapping[...]]` re-evaluated on every call. A value of `None` omits that key.
+- A named `Header` parameter, or a header bag (see above), silently overrides a class default for that one call — this is not treated as the duplicate-binding error two named parameters targeting the same key would be.
+- `Content-Type` and `Cookie` are reserved the same way they are for a named `Header` parameter or a header bag: a static `@headers({...})` containing one raises `TypeError` immediately, a callable's result raises `ValueError` at call time.
+- Pass `headers=` directly to `@get`/`@post`/etc. to replace the class default outright for that one endpoint (not merge with it), or `headers=None` to disable it for that endpoint only.
+- Combining `auth=` (passed to the consumer constructor) with an `Authorization` header from any source (named parameter, bag, or `@headers`) is not recommended: `httpx`'s own `auth` flow sets `Authorization` unconditionally, after headers are otherwise resolved, so it silently overwrites whatever value the request already carries. Use one or the other for a given endpoint.
+
+### Default cookies
+
+Configure cookies sent on every request the same way, with `@cookies`:
+
+```python
+from mxhttp import SyncConsumer, cookies, get
+
+
+@cookies({"tenant": "acme"})
+class Shop(SyncConsumer):
+    @get("/items/{item_id}")
+    def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
+```
+
+- Same static-or-callable shape as `@headers`, same per-endpoint `cookies=`/`cookies=None` override.
+- The cookie jar takes precedence over a `@cookies` default the same way it does over a named `Cookie` parameter: if the jar already holds a cookie with that name (typically because the server previously sent it via `Set-Cookie`), the jar value is sent instead. A `@cookies` default has no per-key override flag of its own — for a cookie that must always win over the jar, use a named `Cookie(override=True)` parameter instead. Note that `@cookies`/`headers()`'s own config is never written back into the jar (`session.cookies`); only real `Set-Cookie` response headers populate it, exactly as before this feature existed.
+- A named `Cookie` parameter, or a cookie bag, silently overrides a class default for that one call, the same as headers.
 
 ### Streaming responses
 

@@ -138,6 +138,23 @@ class SubpathConsumer(SyncConsumer):
     def get_items_no_slash(self) -> list[Item]: ...  # type: ignore[empty-body]
 
 
+def test_constructor_base_url_sets_instance_default() -> None:
+    consumer = SyncConsumer(base_url="https://api.example.com")
+
+    assert consumer.base_url == "https://api.example.com"
+
+
+def test_constructor_base_url_overrides_class_decorator() -> None:
+    consumer = DefaultConsumer(base_url="https://override.example.com")
+
+    assert consumer.base_url == "https://override.example.com"
+
+
+def test_constructor_base_url_invalid_scheme_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="base_url must start with 'http://' or 'https://'"):
+        SyncConsumer(base_url="api.example.com")
+
+
 def test_base_url_preserves_subpath_with_slashes() -> None:
     consumer, requests = make_consumer(SubpathConsumer, [ITEM], track_requests=True)
     consumer.get_items()

@@ -102,15 +102,27 @@ def scalar_str(value: object) -> str:
     return str(value)
 
 
-def insert_unique(target: dict[str, Any], key: str, value: object, kind: str) -> None:
+def insert_unique(
+    target: dict[str, Any],
+    key: str,
+    value: object,
+    kind: str,
+    overridable: set[str] | None = None,
+) -> None:
     """Inserts `value` at `key`, raising if another parameter or bag entry already set it.
 
     Two independent sources (a named parameter, a bag entry, or a static inline-query value)
     targeting the same wire key is treated as a bug regardless of whether the two values happen
-    to be equal, so this never silently overwrites.
+    to be equal, so this never silently overwrites. The one exception is a key already present
+    only because of a resolved `@headers`/`@cookies` class default, tracked via `overridable`:
+    that is a deliberate override, allowed exactly once (the key is dropped from `overridable` on
+    first use), so a second write to the same key still raises like any other collision.
     """
     if key in target:
-        raise ValueError(f"{kind} key {key!r} is set by more than one parameter or bag entry")
+        if overridable is not None and key in overridable:
+            overridable.discard(key)
+        else:
+            raise ValueError(f"{kind} key {key!r} is set by more than one parameter or bag entry")
     target[key] = value
 
 
@@ -350,6 +362,8 @@ def build_request(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     values: Mapping[str, object],
     jar: Mapping[str, str] | None = None,
     base_url: str | None = None,
+    default_headers: Mapping[str, str] | None = None,
+    default_cookies: Mapping[str, str] | None = None,
 ) -> RequestSpec:
     """Builds a request spec from the parameter plan and provided values.
 
@@ -360,12 +374,24 @@ def build_request(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         values: Mapping of parameter names to their values.
         jar: Snapshot of the current cookie jar.
         base_url: Base URL to prefix relative request paths with.
+        default_headers: Resolved class-level `@headers` default. Seeded before named/bag
+            headers, each key overridable (without raising) by exactly one of them.
+        default_cookies: Resolved class-level `@cookies` default. Seeded before named/bag
+            cookies, after applying jar precedence (a class default has no per-key override, so
+            the jar always wins over it), then overridable (without raising) by exactly one
+            named/bag cookie per key.
     """
     path_args: dict[str, object] = {}
     raw_path_args: dict[str, object] = {}
     params: dict[str, QueryValue] = dict(parsed.static_query)
-    headers: dict[str, str] = {}
+    headers: dict[str, str] = dict(default_headers or {})
+    header_defaults = set(headers)
     cookies: dict[str, str] = {}
+    cookie_defaults: set[str] = set()
+    for default_key, default_val in (default_cookies or {}).items():
+        jar_value = (jar or {}).get(default_key)
+        cookies[default_key] = jar_value if jar_value is not None else default_val
+        cookie_defaults.add(default_key)
     fields: dict[str, object] = {}
     files: dict[str, PartValue] = {}
     body: JsonValue = None
@@ -391,11 +417,11 @@ def build_request(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
                 elif p.kind == "field":
                     insert_unique(fields, key, val, "field")
                 elif p.kind == "header":
-                    insert_unique(headers, key, scalar_str(val), "header")
+                    insert_unique(headers, key, scalar_str(val), "header", header_defaults)
                 else:  # cookie
                     jar_value = None if p.cookie_override else (jar or {}).get(key)
                     cookie_val = jar_value if jar_value is not None else scalar_str(val)
-                    insert_unique(cookies, key, cookie_val, "cookie")
+                    insert_unique(cookies, key, cookie_val, "cookie", cookie_defaults)
         elif p.kind == "query":
             insert_unique(params, p.wire_name, value, "query")
         elif p.kind == "field":
@@ -403,11 +429,11 @@ def build_request(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         elif p.kind == "part":
             files[p.wire_name] = value  # type: ignore[assignment]
         elif p.kind == "header":
-            insert_unique(headers, p.wire_name, scalar_str(value), "header")
+            insert_unique(headers, p.wire_name, scalar_str(value), "header", header_defaults)
         elif p.kind == "cookie":
             jar_value = None if p.cookie_override else (jar or {}).get(p.wire_name)
             cookie_val = jar_value if jar_value is not None else scalar_str(value)
-            insert_unique(cookies, p.wire_name, cookie_val, "cookie")
+            insert_unique(cookies, p.wire_name, cookie_val, "cookie", cookie_defaults)
         elif p.raw_body:
             if not isinstance(value, (bytes, str)):  # pragma: no cover
                 raise TypeError(f"RawBody argument {p.py_name!r} must be bytes | str")

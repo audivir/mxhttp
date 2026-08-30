@@ -14,6 +14,8 @@ if TYPE_CHECKING:
     import httpx
 
     from mxhttp.concurrency import Concurrency
+    from mxhttp.cookies import CookiesInput
+    from mxhttp.headers import HeadersInput
     from mxhttp.ratelimit import RateLimit
     from mxhttp.retry import Retry
     from mxhttp.types import AnyC_T, ResponseHandler
@@ -48,6 +50,8 @@ class BaseConsumer:
     _retry: Retry | None = None
     _ratelimit: RateLimit | None = None
     _concurrency: Concurrency | None = None
+    _headers: HeadersInput | None = None
+    _cookies: CookiesInput | None = None
 
     def __init__(
         self,
@@ -55,10 +59,22 @@ class BaseConsumer:
         use_async: bool = False,
         timeout: float | httpx.Timeout = 5.0,
         auth: httpx.Auth | tuple[str, str] | None = None,
+        base_url: str | None = None,
     ) -> None:
-        """Initializes the client."""
+        """Initializes the client.
+
+        Args:
+            use_async: Whether to use an `httpx.AsyncClient` instead of `httpx.Client`.
+            timeout: Default timeout for every request.
+            auth: `httpx` authentication to attach to every request.
+            base_url: Sets the base URL for this instance only, overriding the class-level
+                `@base_url` default (if any). Prefer `@base_url` for a URL shared by every
+                instance; use this for a URL that varies per instance.
+        """
         import httpx
 
+        if base_url is not None:
+            self._base_url = validate_scheme(base_url)
         self._session = (
             httpx.AsyncClient(timeout=timeout, auth=auth)
             if use_async
@@ -80,6 +96,16 @@ class BaseConsumer:
         return self._concurrency
 
     @property
+    def headers(self) -> HeadersInput | None:
+        """The default headers configuration for the consumer class."""
+        return self._headers
+
+    @property
+    def cookies(self) -> CookiesInput | None:
+        """The default cookies configuration for the consumer class."""
+        return self._cookies
+
+    @property
     def session(self) -> httpx.Client | httpx.AsyncClient:
         """The HTTP client used for outbound requests."""
         return self._session
@@ -93,9 +119,10 @@ class SyncConsumer(BaseConsumer):
         *,
         timeout: float | httpx.Timeout = 5.0,
         auth: httpx.Auth | tuple[str, str] | None = None,
+        base_url: str | None = None,
     ) -> None:
         """Initializes the synchronous client."""
-        super().__init__(use_async=False, timeout=timeout, auth=auth)
+        super().__init__(use_async=False, timeout=timeout, auth=auth, base_url=base_url)
 
     def __enter__(self) -> Self:
         return self
@@ -125,9 +152,10 @@ class AsyncConsumer(BaseConsumer):
         *,
         timeout: float | httpx.Timeout = 5.0,
         auth: httpx.Auth | tuple[str, str] | None = None,
+        base_url: str | None = None,
     ) -> None:
         """Initializes the asynchronous client."""
-        super().__init__(use_async=True, timeout=timeout, auth=auth)
+        super().__init__(use_async=True, timeout=timeout, auth=auth, base_url=base_url)
 
     async def __aenter__(self) -> Self:
         return self

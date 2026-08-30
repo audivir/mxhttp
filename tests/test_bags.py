@@ -8,7 +8,7 @@ import pytest
 from conftest import make_consumer
 from models import ITEM, Item, NewItem
 
-from mxhttp import Body, Cookie, Field, Header, Query, SyncConsumer, get, post
+from mxhttp import Body, Cookie, Field, Header, Query, SyncConsumer, cookies, get, headers, post
 
 pytestmark = pytest.mark.anyio
 
@@ -63,6 +63,22 @@ class MultiKindBagApi(SyncConsumer):
         self,
         extra_headers: Annotated[dict[str, str] | None, Header] = None,
         extra_query: Annotated[dict[str, str] | None, Query] = None,
+    ) -> Item: ...
+
+
+@headers({"X-Api-Version": "2"})
+class HeaderBagOverClassDefaultApi(SyncConsumer):
+    @get("/items")
+    def list_items(  # type: ignore[empty-body]
+        self, extra_headers: Annotated[dict[str, str] | None, Header] = None
+    ) -> Item: ...
+
+
+@cookies({"tenant": "acme"})
+class CookieBagOverClassDefaultApi(SyncConsumer):
+    @get("/items")
+    def list_items(  # type: ignore[empty-body]
+        self, extra_cookies: Annotated[dict[str, str] | None, Cookie] = None
     ) -> Item: ...
 
 
@@ -155,6 +171,40 @@ def test_header_and_query_bags_on_same_endpoint_both_work() -> None:
 
     assert seen[0].headers["x-trace-id"] == "abc"
     assert seen[0].url.params.get("tag") == "x"
+
+
+def test_header_bag_key_overrides_class_default_without_raising() -> None:
+    consumer, seen = make_consumer(HeaderBagOverClassDefaultApi, ITEM, track_requests=True)
+
+    consumer.list_items(extra_headers={"X-Api-Version": "3"})
+
+    assert seen[0].headers["x-api-version"] == "3"
+
+
+def test_header_bag_falls_back_to_class_default_when_key_not_given() -> None:
+    consumer, seen = make_consumer(HeaderBagOverClassDefaultApi, ITEM, track_requests=True)
+
+    consumer.list_items(extra_headers={"X-Other": "1"})
+
+    assert seen[0].headers["x-api-version"] == "2"
+    assert seen[0].headers["x-other"] == "1"
+
+
+def test_cookie_bag_key_overrides_class_default_without_raising() -> None:
+    consumer, seen = make_consumer(CookieBagOverClassDefaultApi, ITEM, track_requests=True)
+
+    consumer.list_items(extra_cookies={"tenant": "other"})
+
+    assert "tenant=other" in seen[0].headers["cookie"]
+
+
+def test_cookie_bag_falls_back_to_class_default_when_key_not_given() -> None:
+    consumer, seen = make_consumer(CookieBagOverClassDefaultApi, ITEM, track_requests=True)
+
+    consumer.list_items(extra_cookies={"other": "1"})
+
+    assert "tenant=acme" in seen[0].headers["cookie"]
+    assert "other=1" in seen[0].headers["cookie"]
 
 
 def test_header_bag_rejects_content_type_key() -> None:

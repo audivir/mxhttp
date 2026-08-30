@@ -16,6 +16,7 @@ from mxhttp.concurrency import (
     concurrency,
 )
 from mxhttp.consumer import AsyncConsumer, SyncConsumer, base_url
+from mxhttp.cookies import CookiesInput, cookies
 from mxhttp.download import (
     AsyncDownloader,
     Downloader,
@@ -27,6 +28,7 @@ from mxhttp.download import (
     ProgressCallback,
 )
 from mxhttp.endpoint import delete, endpoint, get, head, patch, post, put
+from mxhttp.headers import HeadersInput, headers
 from mxhttp.markers import Body, Cookie, Field, Header, Part, Path, Query, RawBody, RawPath
 from mxhttp.progress import TqdmProgress
 from mxhttp.ratelimit import RateLimit, RateLimitExceededError, ratelimit
@@ -50,6 +52,7 @@ __all__ = [
     "ConcurrencyExceededError",
     "ConcurrencyTimeoutError",
     "Cookie",
+    "CookiesInput",
     "DownloadIdentityError",
     "DownloadLockError",
     "DownloadState",
@@ -57,6 +60,7 @@ __all__ = [
     "Event",
     "Field",
     "Header",
+    "HeadersInput",
     "Part",
     "PartProgressCallback",
     "PartValue",
@@ -75,10 +79,12 @@ __all__ = [
     "TqdmProgress",
     "base_url",
     "concurrency",
+    "cookies",
     "delete",
     "endpoint",
     "get",
     "head",
+    "headers",
     "patch",
     "post",
     "put",

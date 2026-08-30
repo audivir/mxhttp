@@ -19,7 +19,9 @@ from typing import (
 from mxhttp.checksum import ChecksumInput, resolve_checksum
 from mxhttp.concurrency import Concurrency, gate_concurrency_async, gate_concurrency_sync
 from mxhttp.consumer import validate_scheme
+from mxhttp.cookies import resolve_cookies
 from mxhttp.download import AsyncDownloader, Downloader, Parts, resolve_parts
+from mxhttp.headers import resolve_headers
 from mxhttp.parse import split_path_template
 from mxhttp.ratelimit import gate_async, gate_sync
 from mxhttp.request import RequestSpec, build_plan, build_request
@@ -40,6 +42,8 @@ from mxhttp.types import MISSING
 if TYPE_CHECKING:
     from mxhttp import AsyncConsumer, SyncConsumer
     from mxhttp.consumer import BaseConsumer
+    from mxhttp.cookies import CookiesInput
+    from mxhttp.headers import HeadersInput
     from mxhttp.ratelimit import RateLimit
     from mxhttp.types import AnyC_T, AsyncC_T, Method_T, Missing, Parsed_T, SyncC_T
 
@@ -157,6 +161,8 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
     concurrency: int | Concurrency | Missing | None = MISSING,
     parts: int | Parts | None = None,
     checksum: ChecksumInput = None,
+    headers: HeadersInput | Missing | None = MISSING,
+    cookies: CookiesInput | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Shared implementation for the HTTP method decorator factories.
 
@@ -177,6 +183,12 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
             Pass `None` explicitly to disable concurrency limits for this endpoint only.
         parts: Configures multi-part parallel segmented download for `Downloader`/`AsyncDownloader`.
         checksum: Configures checksum validation for `Downloader`/`AsyncDownloader`.
+        headers: Overrides the class-level `@headers` default for this endpoint only, replacing
+            it outright rather than merging. Pass `None` explicitly to disable it for this
+            endpoint only.
+        cookies: Overrides the class-level `@cookies` default for this endpoint only, replacing
+            it outright rather than merging. Pass `None` explicitly to disable it for this
+            endpoint only.
     """
     if path.startswith(("http://", "https://")):
         if base_url is not MISSING:
@@ -225,13 +237,29 @@ def endpoint(  # noqa: C901, PLR0913, PLR0915, PLR0917
                 )
             return resolved
 
+        def resolve_class_headers(self: BaseConsumer) -> HeadersInput | None:
+            """Resolves the endpoint headers override, falling back to the consumer default."""
+            return self._headers if headers is MISSING else headers
+
+        def resolve_class_cookies(self: BaseConsumer) -> CookiesInput | None:
+            """Resolves the endpoint cookies override, falling back to the consumer default."""
+            return self._cookies if cookies is MISSING else cookies
+
         def resolve_spec(self: BaseConsumer, *args: P.args, **kwargs: P.kwargs) -> RequestSpec:
             """Binds call arguments against the stub signature and builds the request spec."""
             bound = sig.bind(self, *args, **kwargs)
             bound.apply_defaults()
-            jar = dict(self.session.cookies) if has_cookies else None
+            class_cookies = resolve_class_cookies(self)
+            jar = dict(self.session.cookies) if has_cookies or class_cookies is not None else None
             return build_request(
-                method, parsed, plan, bound.arguments, jar=jar, base_url=resolve_base_url(self)
+                method,
+                parsed,
+                plan,
+                bound.arguments,
+                jar=jar,
+                base_url=resolve_base_url(self),
+                default_headers=resolve_headers(self, resolve_class_headers(self)),
+                default_cookies=resolve_cookies(self, class_cookies),
             )
 
         def resolve_retry(self: BaseConsumer) -> Retry | None:
@@ -381,63 +409,130 @@ def get(  # noqa: PLR0913,PLR0917
     concurrency: int | Concurrency | Missing | None = MISSING,
     parts: int | Parts | None = None,
     checksum: ChecksumInput = None,
+    headers: HeadersInput | Missing | None = MISSING,
+    cookies: CookiesInput | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `GET {path}`."""
     return endpoint(
-        "GET", path, retry, ratelimit, resumable, base_url, concurrency, parts, checksum
+        "GET",
+        path,
+        retry,
+        ratelimit,
+        resumable,
+        base_url,
+        concurrency,
+        parts,
+        checksum,
+        headers,
+        cookies,
     )
 
 
-def post(
+def post(  # noqa: PLR0913,PLR0917
     path: str,
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
     base_url: str | Missing = MISSING,
     concurrency: int | Concurrency | Missing | None = MISSING,
+    headers: HeadersInput | Missing | None = MISSING,
+    cookies: CookiesInput | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `POST {path}`."""
-    return endpoint("POST", path, retry, ratelimit, base_url=base_url, concurrency=concurrency)
+    return endpoint(
+        "POST",
+        path,
+        retry,
+        ratelimit,
+        base_url=base_url,
+        concurrency=concurrency,
+        headers=headers,
+        cookies=cookies,
+    )
 
 
-def put(
+def put(  # noqa: PLR0913,PLR0917
     path: str,
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
     base_url: str | Missing = MISSING,
     concurrency: int | Concurrency | Missing | None = MISSING,
+    headers: HeadersInput | Missing | None = MISSING,
+    cookies: CookiesInput | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `PUT {path}`."""
-    return endpoint("PUT", path, retry, ratelimit, base_url=base_url, concurrency=concurrency)
+    return endpoint(
+        "PUT",
+        path,
+        retry,
+        ratelimit,
+        base_url=base_url,
+        concurrency=concurrency,
+        headers=headers,
+        cookies=cookies,
+    )
 
 
-def patch(
+def patch(  # noqa: PLR0913,PLR0917
     path: str,
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
     base_url: str | Missing = MISSING,
     concurrency: int | Concurrency | Missing | None = MISSING,
+    headers: HeadersInput | Missing | None = MISSING,
+    cookies: CookiesInput | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `PATCH {path}`."""
-    return endpoint("PATCH", path, retry, ratelimit, base_url=base_url, concurrency=concurrency)
+    return endpoint(
+        "PATCH",
+        path,
+        retry,
+        ratelimit,
+        base_url=base_url,
+        concurrency=concurrency,
+        headers=headers,
+        cookies=cookies,
+    )
 
 
-def delete(
+def delete(  # noqa: PLR0913,PLR0917
     path: str,
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
     base_url: str | Missing = MISSING,
     concurrency: int | Concurrency | Missing | None = MISSING,
+    headers: HeadersInput | Missing | None = MISSING,
+    cookies: CookiesInput | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `DELETE {path}`."""
-    return endpoint("DELETE", path, retry, ratelimit, base_url=base_url, concurrency=concurrency)
+    return endpoint(
+        "DELETE",
+        path,
+        retry,
+        ratelimit,
+        base_url=base_url,
+        concurrency=concurrency,
+        headers=headers,
+        cookies=cookies,
+    )
 
 
-def head(
+def head(  # noqa: PLR0913,PLR0917
     path: str,
     retry: Retry | Missing | None = MISSING,
     ratelimit: RateLimit | Missing | None = MISSING,
     base_url: str | Missing = MISSING,
     concurrency: int | Concurrency | Missing | None = MISSING,
+    headers: HeadersInput | Missing | None = MISSING,
+    cookies: CookiesInput | Missing | None = MISSING,
 ) -> EndpointDecorator:
     """Declares a stub method as `HEAD {path}`."""
-    return endpoint("HEAD", path, retry, ratelimit, base_url=base_url, concurrency=concurrency)
+    return endpoint(
+        "HEAD",
+        path,
+        retry,
+        ratelimit,
+        base_url=base_url,
+        concurrency=concurrency,
+        headers=headers,
+        cookies=cookies,
+    )
