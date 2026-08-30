@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     import httpx
 
     from mxhttp.concurrency import Concurrency
-    from mxhttp.consumer import AsyncConsumer, BaseConsumer, SyncConsumer
+    from mxhttp.consumer import AsyncConsumer, SyncConsumer
     from mxhttp.request import RequestSpec
     from mxhttp.retry import Retry
 
@@ -85,22 +85,24 @@ def decode(  # noqa: PLR0911
     return msgspec.json.decode(response.content, type=return_type)
 
 
-def apply_response_handler(self: BaseConsumer, response: httpx.Response) -> httpx.Response:
+def apply_response_handler(
+    handler: ResponseHandler | None, response: httpx.Response
+) -> httpx.Response:
     """Applies the response hook, or calls `raise_for_status` if unset."""
-    if self._response_handler:
-        return self._response_handler(response)
+    if handler:
+        return handler(response)
     return response.raise_for_status()
 
 
 def apply_streaming_response_handler(
-    self: BaseConsumer, response: httpx.Response
+    handler: ResponseHandler | None, response: httpx.Response
 ) -> httpx.Response:
     """Applies the streaming response hook, or calls `raise_for_status` if unset.
 
     Only the status line and headers are available at this point.
     """
-    if self._streaming_response_handler:
-        return self._streaming_response_handler(response)
+    if handler:
+        return handler(response)
     return response.raise_for_status()
 
 
@@ -114,7 +116,10 @@ def response_handler(
     """
 
     def decorate(cls: type[AnyC_T]) -> type[AnyC_T]:
-        cls._response_handler = staticmethod(hook)
+        cls._class_endpoint_kwargs = {
+            **cls._class_endpoint_kwargs,
+            "response_handler": staticmethod(hook),
+        }
         return cls
 
     return decorate
@@ -130,7 +135,10 @@ def streaming_response_handler(
     """
 
     def decorate(cls: type[AnyC_T]) -> type[AnyC_T]:
-        cls._streaming_response_handler = staticmethod(hook)
+        cls._class_endpoint_kwargs = {
+            **cls._class_endpoint_kwargs,
+            "streaming_response_handler": staticmethod(hook),
+        }
         return cls
 
     return decorate
@@ -140,6 +148,7 @@ def stream_sync(
     self: SyncConsumer,
     spec: RequestSpec,
     concurrency: Concurrency | None = None,
+    handler: ResponseHandler | None = None,
 ) -> Iterator[bytes]:
     """Streams the response body in chunks instead of buffering it.
 
@@ -152,7 +161,7 @@ def stream_sync(
         gate_concurrency_sync(spec.url, concurrency),
         self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response,
     ):
-        apply_streaming_response_handler(self, response)
+        apply_streaming_response_handler(handler, response)
         yield from response.iter_bytes()
 
 
@@ -160,6 +169,7 @@ async def stream_async(
     self: AsyncConsumer,
     spec: RequestSpec,
     concurrency: Concurrency | None = None,
+    handler: ResponseHandler | None = None,
 ) -> AsyncIterator[bytes]:
     """Streams the response body in chunks instead of buffering it.
 
@@ -172,7 +182,7 @@ async def stream_async(
         gate_concurrency_async(spec.url, concurrency),
         self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response,
     ):
-        apply_streaming_response_handler(self, response)
+        apply_streaming_response_handler(handler, response)
         async for chunk in response.aiter_bytes():
             yield chunk
 
@@ -192,6 +202,7 @@ def resumable_stream_sync(
     spec: RequestSpec,
     config: Retry,
     concurrency: Concurrency | None = None,
+    handler: ResponseHandler | None = None,
 ) -> Iterator[bytes]:
     """Streams the response body, reconnecting with `Range` on a transport error mid-stream.
 
@@ -212,7 +223,7 @@ def resumable_stream_sync(
             kwargs["headers"] = resume_headers(spec, received, validator) or None
             try:
                 with self.session.stream(spec.method, spec.url, **kwargs) as response:
-                    apply_streaming_response_handler(self, response)
+                    apply_streaming_response_handler(handler, response)
                     if received and response.status_code != HTTPStatus.PARTIAL_CONTENT:
                         raise ResumeLostError("server ignored Range or the resource changed")
                     if validator is None:
@@ -237,6 +248,7 @@ async def resumable_stream_async(
     spec: RequestSpec,
     config: Retry,
     concurrency: Concurrency | None = None,
+    handler: ResponseHandler | None = None,
 ) -> AsyncIterator[bytes]:
     """Streams the response body, reconnecting with `Range` on a transport error mid-stream.
 
@@ -257,7 +269,7 @@ async def resumable_stream_async(
             kwargs["headers"] = resume_headers(spec, received, validator) or None
             try:
                 async with self.session.stream(spec.method, spec.url, **kwargs) as response:
-                    apply_streaming_response_handler(self, response)
+                    apply_streaming_response_handler(handler, response)
                     if received and response.status_code != HTTPStatus.PARTIAL_CONTENT:
                         raise ResumeLostError("server ignored Range or the resource changed")
                     if validator is None:
@@ -281,6 +293,7 @@ def sse_sync(
     self: SyncConsumer,
     spec: RequestSpec,
     concurrency: Concurrency | None = None,
+    handler: ResponseHandler | None = None,
 ) -> Iterator[Event]:
     """Streams the response as parsed Server-Sent Events.
 
@@ -292,7 +305,7 @@ def sse_sync(
     with gate_concurrency_sync(spec.url, concurrency):
         builder = SseBuilder()
         with self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response:
-            apply_streaming_response_handler(self, response)
+            apply_streaming_response_handler(handler, response)
             for line in response.iter_lines():
                 event = builder.feed(line)
                 if event is not None:
@@ -303,6 +316,7 @@ async def sse_async(
     self: AsyncConsumer,
     spec: RequestSpec,
     concurrency: Concurrency | None = None,
+    handler: ResponseHandler | None = None,
 ) -> AsyncIterator[Event]:
     """Streams the response as parsed Server-Sent Events.
 
@@ -314,7 +328,7 @@ async def sse_async(
     async with gate_concurrency_async(spec.url, concurrency):
         builder = SseBuilder()
         async with self.session.stream(spec.method, spec.url, **spec.to_kwargs()) as response:
-            apply_streaming_response_handler(self, response)
+            apply_streaming_response_handler(handler, response)
             async for line in response.aiter_lines():
                 event = builder.feed(line)
                 if event is not None:

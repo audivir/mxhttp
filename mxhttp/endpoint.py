@@ -62,7 +62,16 @@ if TYPE_CHECKING:
     from mxhttp.headers import HeadersInput
     from mxhttp.parse import ParsedPath
     from mxhttp.ratelimit import RateLimit
-    from mxhttp.types import AnyC_T, AsyncC_T, Method_T, Missing, Parsed_T, RequestHandler, SyncC_T
+    from mxhttp.types import (
+        AnyC_T,
+        AsyncC_T,
+        Method_T,
+        Missing,
+        Parsed_T,
+        RequestHandler,
+        ResponseHandler,
+        SyncC_T,
+    )
 
 P = ParamSpec("P")
 Concurrency_T = TypeVar("Concurrency_T", "int | Concurrency", "Concurrency")
@@ -89,6 +98,10 @@ class BaseEndpointKwargs(TypedDict, Generic[Concurrency_T, Missing_T], total=Fal
         request_handler: Overrides the class-level `@request_handler` default for this endpoint
             only, replacing it outright rather than composing. Pass `None` explicitly to disable
             it for this endpoint only.
+        response_handler: Overrides the class-level `@response_handler` default for this endpoint
+            only. Ignored for streaming endpoints; see `streaming_response_handler`.
+        streaming_response_handler: Overrides the class-level `@streaming_response_handler`
+            default for this endpoint only. Ignored for non-streaming endpoints.
     """
 
     retry: Retry | Missing_T | None
@@ -98,6 +111,8 @@ class BaseEndpointKwargs(TypedDict, Generic[Concurrency_T, Missing_T], total=Fal
     headers: HeadersInput | Missing_T | None
     cookies: CookiesInput | Missing_T | None
     request_handler: RequestHandler | Missing_T | None
+    response_handler: ResponseHandler | Missing_T | None
+    streaming_response_handler: ResponseHandler | Missing_T | None
 
 
 EndpointKwargs: TypeAlias = "BaseEndpointKwargs[int | Concurrency, Missing]"
@@ -412,7 +427,14 @@ def endpoint(  # noqa: C901, PLR0913, PLR0917
 
         def downloader_tail(
             resolved: ResolvedEndpointKwargs,
-        ) -> tuple[Retry, RateLimit | None, Concurrency | None, Parts | None, Checksum | None]:
+        ) -> tuple[
+            Retry,
+            RateLimit | None,
+            Concurrency | None,
+            Parts | None,
+            Checksum | None,
+            ResponseHandler | None,
+        ]:
             """Builds the trailing `Downloader`/`AsyncDownloader` constructor args."""
             return (
                 resumable or DOWNLOAD_DEFAULT_RETRY,
@@ -420,6 +442,7 @@ def endpoint(  # noqa: C901, PLR0913, PLR0917
                 resolved["concurrency"],
                 resolve_parts(parts),
                 resolve_checksum(checksum),
+                resolved["streaming_response_handler"],
             )
 
         def resolve_call_sync(
@@ -457,19 +480,31 @@ def endpoint(  # noqa: C901, PLR0913, PLR0917
                     if conf.is_async_downloader:
                         return AsyncDownloader(self, spec, *downloader_tail(resolved))
                     if conf.is_sse_stream:
-                        return sse_async(self, spec, resolved["concurrency"])
+                        return sse_async(
+                            self,
+                            spec,
+                            resolved["concurrency"],
+                            resolved["streaming_response_handler"],
+                        )
                     if resumable is not None:
                         return resumable_stream_async(
-                            self, spec, resumable, resolved["concurrency"]
+                            self,
+                            spec,
+                            resumable,
+                            resolved["concurrency"],
+                            resolved["streaming_response_handler"],
                         )
-                    return stream_async(self, spec, resolved["concurrency"])
+                    return stream_async(
+                        self, spec, resolved["concurrency"], resolved["streaming_response_handler"]
+                    )
                 resolved = resolve_endpoint_kwargs(self, runtime)
                 gate_url = resolve_gate_url(runtime, resolved)
                 async with gate_concurrency_async(gate_url, resolved["concurrency"]):
                     await gate_async(gate_url, resolved["ratelimit"])
                     spec = build_spec(self, runtime, resolved, *args, **kwargs)
                     response = await request_async(self, spec, resolved["retry"])
-                    return decode(apply_response_handler(self, response), return_type)
+                    handler = resolved["response_handler"]
+                    return decode(apply_response_handler(handler, response), return_type)
 
             return async_wrapper  # type: ignore[return-value]
 
@@ -482,17 +517,28 @@ def endpoint(  # noqa: C901, PLR0913, PLR0917
                 if conf.is_downloader:
                     return Downloader(self, spec, *downloader_tail(resolved))
                 if conf.is_sse_stream:
-                    return sse_sync(self, spec, resolved["concurrency"])
+                    return sse_sync(
+                        self, spec, resolved["concurrency"], resolved["streaming_response_handler"]
+                    )
                 if resumable is not None:
-                    return resumable_stream_sync(self, spec, resumable, resolved["concurrency"])
-                return stream_sync(self, spec, resolved["concurrency"])
+                    return resumable_stream_sync(
+                        self,
+                        spec,
+                        resumable,
+                        resolved["concurrency"],
+                        resolved["streaming_response_handler"],
+                    )
+                return stream_sync(
+                    self, spec, resolved["concurrency"], resolved["streaming_response_handler"]
+                )
             resolved = resolve_endpoint_kwargs(self, runtime)
             gate_url = resolve_gate_url(runtime, resolved)
             with gate_concurrency_sync(gate_url, resolved["concurrency"]):
                 gate_sync(gate_url, resolved["ratelimit"])
                 spec = build_spec(self, runtime, resolved, *args, **kwargs)
                 response = request_sync(self, spec, resolved["retry"])
-                return decode(apply_response_handler(self, response), return_type)
+                handler = resolved["response_handler"]
+                return decode(apply_response_handler(handler, response), return_type)
 
         return wrapper  # type: ignore[return-value]
 

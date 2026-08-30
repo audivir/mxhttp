@@ -238,6 +238,36 @@ def test_response_handler_transforms_response() -> None:
     assert result == ITEM
 
 
+def test_endpoint_response_handler_overrides_class_default() -> None:
+    class OtherError(Exception):
+        pass
+
+    def raise_other(unused_response: httpx.Response) -> httpx.Response:
+        raise OtherError("overridden")
+
+    @response_handler(raise_on_error)
+    class MixedApi(SyncConsumer):
+        @get("/items/{item_id}", response_handler=raise_other)
+        def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
+
+    consumer = make_consumer(MixedApi, b"not found", status_code=404)
+
+    with pytest.raises(OtherError):
+        consumer.get_item(item_id=1)
+
+
+def test_endpoint_response_handler_none_disables_class_default() -> None:
+    @response_handler(raise_on_error)
+    class MixedApi(SyncConsumer):
+        @get("/items/{item_id}", response_handler=None)
+        def get_item(self, item_id: int) -> Item: ...  # type: ignore[empty-body]
+
+    consumer = make_consumer(MixedApi, ITEM, status_code=404)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        consumer.get_item(item_id=1)
+
+
 def test_no_response_handler_passes_response_through_unmodified() -> None:
     consumer = make_consumer(PathApi, ITEM)
 
@@ -370,6 +400,24 @@ async def test_streaming_response_handler_override_passes_through_success(
         chunks = list(consumer.download(file_id=1))
 
     assert b"".join(chunks) == b"streamed file contents"
+
+
+def test_endpoint_streaming_response_handler_overrides_class_default() -> None:
+    class OtherError(Exception):
+        pass
+
+    def raise_other(unused_response: httpx.Response) -> httpx.Response:
+        raise OtherError("overridden")
+
+    @streaming_response_handler(raise_on_error_status_only)
+    class MixedStreamApi(SyncConsumer):
+        @get("/download/{file_id}", streaming_response_handler=raise_other)
+        def download(self, file_id: int) -> Iterator[bytes]: ...  # type: ignore[empty-body]
+
+    consumer = make_consumer(MixedStreamApi, b"not found", status_code=404)
+
+    with pytest.raises(OtherError):
+        list(consumer.download(file_id=1))
 
 
 @pytest.mark.parametrize("cls", [StreamApi, AsyncStreamApi], ids=["sync", "async"])

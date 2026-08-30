@@ -34,6 +34,7 @@ from mxhttp.retry import (
     resolve_delay,
     retryable_exceptions,
 )
+from mxhttp.types import ResponseHandler  # noqa: TC001
 
 if TYPE_CHECKING:
     import anyio
@@ -263,6 +264,7 @@ class Downloader(msgspec.Struct, frozen=True):
     concurrency: Concurrency | None = None
     parts: Parts | None = None
     checksum: Checksum | None = None
+    streaming_response_handler: ResponseHandler | None = None
 
     def __call__(  # noqa: PLR0913
         self,
@@ -352,7 +354,7 @@ class Downloader(msgspec.Struct, frozen=True):
                     with self.consumer.session.stream(
                         self.spec.method, self.spec.url, **kwargs
                     ) as response:
-                        apply_streaming_response_handler(self.consumer, response)
+                        apply_streaming_response_handler(self.streaming_response_handler, response)
                         if received and response.status_code != HTTPStatus.PARTIAL_CONTENT:
                             raise ResumeLostError("server ignored Range or the resource changed")
                         if validator is None:
@@ -418,7 +420,7 @@ class Downloader(msgspec.Struct, frozen=True):
             with self.consumer.session.stream(
                 self.spec.method, self.spec.url, **probe_kwargs
             ) as probe_resp:
-                apply_streaming_response_handler(self.consumer, probe_resp)
+                apply_streaming_response_handler(self.streaming_response_handler, probe_resp)
                 if probe_resp.status_code != HTTPStatus.PARTIAL_CONTENT:
                     cleanup_staging_files(target)
                     return self._download_single_stream(
@@ -510,7 +512,7 @@ class Downloader(msgspec.Struct, frozen=True):
                     with self.consumer.session.stream(
                         self.spec.method, self.spec.url, **part_kwargs
                     ) as resp:
-                        apply_streaming_response_handler(self.consumer, resp)
+                        apply_streaming_response_handler(self.streaming_response_handler, resp)
                         if (
                             resp.status_code != HTTPStatus.PARTIAL_CONTENT
                             and (part_info.start + part_info.received) > 0
@@ -599,6 +601,7 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
     concurrency: Concurrency | None = None
     parts: Parts | None = None
     checksum: Checksum | None = None
+    streaming_response_handler: ResponseHandler | None = None
 
     async def __call__(  # noqa: PLR0913
         self,
@@ -691,7 +694,7 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                     async with self.consumer.session.stream(
                         self.spec.method, self.spec.url, **kwargs
                     ) as response:
-                        apply_streaming_response_handler(self.consumer, response)
+                        apply_streaming_response_handler(self.streaming_response_handler, response)
                         if received and response.status_code != HTTPStatus.PARTIAL_CONTENT:
                             raise ResumeLostError("server ignored Range or the resource changed")
                         if validator is None:
@@ -761,7 +764,7 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
             async with self.consumer.session.stream(
                 self.spec.method, self.spec.url, **probe_kwargs
             ) as probe_resp:
-                apply_streaming_response_handler(self.consumer, probe_resp)
+                apply_streaming_response_handler(self.streaming_response_handler, probe_resp)
                 if probe_resp.status_code != HTTPStatus.PARTIAL_CONTENT:
                     await cleanup_staging_files_async(target)
                     return await self._download_single_stream_async(
@@ -862,7 +865,7 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                     async with self.consumer.session.stream(
                         self.spec.method, self.spec.url, **part_kwargs
                     ) as resp:
-                        apply_streaming_response_handler(self.consumer, resp)
+                        apply_streaming_response_handler(self.streaming_response_handler, resp)
                         if (
                             resp.status_code != HTTPStatus.PARTIAL_CONTENT
                             and (part_info.start + part_info.received) > 0

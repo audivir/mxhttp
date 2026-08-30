@@ -198,6 +198,8 @@ class Shop(SyncConsumer): ...
 
 The `@response_handler` hook runs on buffered responses before decoding. For streaming and SSE endpoints, `@streaming_response_handler` inspects the initial status line and headers before chunks or events are yielded.
 
+Pass `response_handler=`/`streaming_response_handler=` directly to `@get`/`@post`/etc. to override the class-level hook for that one endpoint, or `=None` to disable it for that endpoint only.
+
 ### Request handling
 
 `@request_handler` runs every built request through a hook just before it is sent, for cross-cutting concerns like signing or tracing that would otherwise need repeating in every endpoint:

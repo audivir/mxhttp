@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     import httpx
 
     from mxhttp.endpoint import ResolvedEndpointKwargs
-    from mxhttp.types import AnyC_T, ResponseHandler
+    from mxhttp.types import AnyC_T
 
 
 def validate_scheme(url: str) -> str:
@@ -41,8 +41,6 @@ class BaseConsumer:
     """Base class for the sync and async declarative API client."""
 
     _base_url: str | None = None
-    _response_handler: ResponseHandler | None = None
-    _streaming_response_handler: ResponseHandler | None = None
     _class_endpoint_kwargs: ClassVar[ResolvedEndpointKwargs] = {}
 
     def __init__(
