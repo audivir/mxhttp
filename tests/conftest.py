@@ -83,8 +83,7 @@ def make_consumer(  # noqa: C901,PLR0913
     consumer = cls(auth=auth)
     if base_url is not None:
         consumer._base_url = base_url
-    elif consumer.base_url is None:
-        consumer._base_url = "https://api.example.com"
+    consumer._base_url = consumer._base_url or "https://api.example.com"
 
     if issubclass(cls, SyncConsumer):
         consumer._session = httpx.Client(transport=httpx.MockTransport(sync_handler), auth=auth)
@@ -118,8 +117,7 @@ def make_stateful_consumer(
 
     transport = httpx.MockTransport(handler)
     consumer = cls()
-    if consumer.base_url is None:  # pragma: no branch
-        consumer._base_url = "https://api.example.com"
+    consumer._base_url = consumer._base_url or "https://api.example.com"
     if issubclass(cls, SyncConsumer):
         consumer._session = httpx.Client(transport=transport)
     else:

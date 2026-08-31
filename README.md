@@ -249,7 +249,7 @@ class Shop(SyncConsumer):
     def create_item(self, item: Annotated[NewItem, Body]) -> Item: ...  # type: ignore[empty-body]
 ```
 
-Pair `@retry` with `idempotent=` on `POST`/`PUT` endpoints so a retried write isn't applied twice server-side:
+Pair `@retry` with `idempotent=` on `POST`/`PUT` endpoints so a retried write is not applied twice server-side:
 
 ```python
 class Shop(SyncConsumer):
@@ -262,7 +262,7 @@ class Shop(SyncConsumer):
 ```
 
 - `idempotent=True` attaches an `Idempotency-Key: <uuid4>` header. `idempotent=<callable>` calls it with no arguments to produce the key instead. Either way, the key is generated **once per call**, before `@retry` starts resending the request, so every retry attempt of that one call carries the same key — a well-behaved server recognizes the repeat and returns the original result instead of applying the write again. Two separate calls always get different keys.
-- Only valid on `@post`/`@put`; `@get`/`@patch`/`@delete`/`@head` don't accept it at all.
+- Only valid on `@post`/`@put`; `@get`/`@patch`/`@delete`/`@head` do not accept it at all.
 - `Idempotency-Key` is reserved the same way `Content-Type`/`Cookie` are (see "Raw request bodies" above): it cannot be set through a `Header` parameter, a header bag, or `@headers`.
 
 ### Rate limiting
@@ -327,9 +327,9 @@ class AuthedShop(SyncConsumer):
 
 - `headers()` accepts a static `Mapping[str, str | int | float | bool | None]` or a `Callable[[BaseConsumer], Mapping[...]]` re-evaluated on every call. A value of `None` omits that key.
 - A named `Header` parameter, or a header bag (see above), silently overrides a class default for that one call — this is not treated as the duplicate-binding error two named parameters targeting the same key would be.
-- `Content-Type` and `Cookie` are reserved the same way they are for a named `Header` parameter or a header bag: a static `@headers({...})` containing one raises `TypeError` immediately, a callable's result raises `ValueError` at call time.
+- `Content-Type` and `Cookie` are reserved the same way they are for a named `Header` parameter or a header bag: a static `@headers({...})` containing one raises `TypeError` immediately, a callable returning one raises `ValueError` at call time.
 - Pass `headers=` directly to `@get`/`@post`/etc. to replace the class default outright for that one endpoint (not merge with it), or `headers=None` to disable it for that endpoint only.
-- Combining `auth=` (passed to the consumer constructor) with an `Authorization` header from any source (named parameter, bag, or `@headers`) is not recommended: `httpx`'s own `auth` flow sets `Authorization` unconditionally, after headers are otherwise resolved, so it silently overwrites whatever value the request already carries. Use one or the other for a given endpoint.
+- Combining `auth=` (passed to the consumer constructor) with an `Authorization` header from any source (named parameter, bag, or `@headers`) is not recommended: the `httpx` `auth` flow sets `Authorization` unconditionally, after headers are otherwise resolved, so it silently overwrites whatever value the request already carries. Use one or the other for a given endpoint.
 
 ### Default cookies
 
@@ -346,7 +346,7 @@ class Shop(SyncConsumer):
 ```
 
 - Same static-or-callable shape as `@headers`, same per-endpoint `cookies=`/`cookies=None` override.
-- The cookie jar takes precedence over a `@cookies` default the same way it does over a named `Cookie` parameter: if the jar already holds a cookie with that name (typically because the server previously sent it via `Set-Cookie`), the jar value is sent instead. A `@cookies` default has no per-key override flag of its own — for a cookie that must always win over the jar, use a named `Cookie(override=True)` parameter instead. Note that `@cookies`/`headers()`'s own config is never written back into the jar (`session.cookies`); only real `Set-Cookie` response headers populate it, exactly as before this feature existed.
+- The cookie jar takes precedence over a `@cookies` default the same way it does over a named `Cookie` parameter: if the jar already holds a cookie with that name (typically because the server previously sent it via `Set-Cookie`), the jar value is sent instead. A `@cookies` default has no per-key override flag of its own — for a cookie that must always win over the jar, use a named `Cookie(override=True)` parameter instead. Note that the `@cookies`/`@headers` config is never written back into the jar (`session.cookies`); only real `Set-Cookie` response headers populate it, exactly as before this feature existed.
 - A named `Cookie` parameter, or a cookie bag, silently overrides a class default for that one call, the same as headers.
 
 ### Streaming responses

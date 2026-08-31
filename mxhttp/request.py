@@ -99,8 +99,7 @@ class RequestSpec(msgspec.Struct):
 def request_handler(hook: RequestHandler) -> Callable[[type[AnyC_T]], type[AnyC_T]]:
     """Class decorator that runs every built request through `hook` before it is sent.
 
-    Runs once per call, before `@retry` starts resending the request, so every retry attempt of
-    one call reuses the same request that `hook` returned.
+    Runs once per call, before `@retry` starts resending the request.
     """
 
     def decorate(cls: type[AnyC_T]) -> type[AnyC_T]:
@@ -129,12 +128,8 @@ def insert_unique(
 ) -> None:
     """Inserts `value` at `key`, raising if another parameter or bag entry already set it.
 
-    Two independent sources (a named parameter, a bag entry, or a static inline-query value)
-    targeting the same wire key is treated as a bug regardless of whether the two values happen
-    to be equal, so this never silently overwrites. The one exception is a key already present
-    only because of a resolved `@headers`/`@cookies` class default, tracked via `overridable`:
-    that is a deliberate override, allowed exactly once (the key is dropped from `overridable` on
-    first use), so a second write to the same key still raises like any other collision.
+    Two instance-levels sources are forbidden by design, even when holding the same value,
+    only class-level headers or cookies are overridable once.
     """
     if key in target:
         if overridable is not None and key in overridable:

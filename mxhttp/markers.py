@@ -51,10 +51,8 @@ def is_scalar_sequence(hint: type | None) -> bool:
 def is_scalar_mapping(hint: type | None, *, allow_sequence: bool = False) -> bool:
     """Checks whether `hint` is a `dict`/`Mapping` of `str` keys to scalar `ParamValue` values.
 
-    A value may itself be `| None` (an individual bag entry omits its key at call time, mirroring
-    how `None` already omits an ordinary optional parameter). When `allow_sequence` is set, a
-    value may also be (or include, in a union) a `Sequence[ParamValue]`, mirroring the equivalent
-    named parameter's repeated-key handling.
+    A value may be `| None`. When `allow_sequence` is set, a value may also be a
+    `Sequence[ParamValue]`.
     """
     if get_origin(hint) not in (dict, Mapping):
         return False

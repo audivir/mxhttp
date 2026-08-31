@@ -45,7 +45,7 @@ def test_consumer_timeout() -> None:
 
 def test_consumer_default_base_url_is_none() -> None:
     consumer = SyncConsumer()
-    assert consumer.base_url is None
+    assert consumer._base_url is None  # noqa: SLF001
 
 
 @base_url("https://api.example.com")
@@ -65,7 +65,7 @@ class DefaultConsumer(SyncConsumer):
 
 def test_base_url_decorator_and_endpoint_resolution() -> None:
     consumer, requests = make_consumer(DefaultConsumer, [ITEM], track_requests=True)
-    assert consumer.base_url == "https://api.example.com"
+    assert consumer._base_url == "https://api.example.com"  # noqa: SLF001
 
     consumer.get_items()
     consumer.get_metrics()
@@ -141,13 +141,13 @@ class SubpathConsumer(SyncConsumer):
 def test_constructor_base_url_sets_instance_default() -> None:
     consumer = SyncConsumer(base_url="https://api.example.com")
 
-    assert consumer.base_url == "https://api.example.com"
+    assert consumer._base_url == "https://api.example.com"  # noqa: SLF001
 
 
 def test_constructor_base_url_overrides_class_decorator() -> None:
     consumer = DefaultConsumer(base_url="https://override.example.com")
 
-    assert consumer.base_url == "https://override.example.com"
+    assert consumer._base_url == "https://override.example.com"  # noqa: SLF001
 
 
 def test_constructor_base_url_invalid_scheme_raises_value_error() -> None:

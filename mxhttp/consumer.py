@@ -45,21 +45,20 @@ class BaseConsumer:
 
     def __init__(
         self,
+        base_url: str | None = None,
         *,
         use_async: bool = False,
         timeout: float | httpx.Timeout = 5.0,
         auth: httpx.Auth | tuple[str, str] | None = None,
-        base_url: str | None = None,
     ) -> None:
         """Initializes the client.
 
         Args:
+            base_url: Sets the base URL for this instance only, overriding the class-level
+                `@base_url` (if any). Prefer `@base_url` for a URL shared by every instance.
             use_async: Whether to use an `httpx.AsyncClient` instead of `httpx.Client`.
             timeout: Default timeout for every request.
             auth: `httpx` authentication to attach to every request.
-            base_url: Sets the base URL for this instance only, overriding the class-level
-                `@base_url` default (if any). Prefer `@base_url` for a URL shared by every
-                instance; use this for a URL that varies per instance.
         """
         import httpx
 
@@ -74,11 +73,6 @@ class BaseConsumer:
     @override
     def __repr__(self) -> str:  # pragma: no cover
         return f"{type(self).__name__}<{self._base_url}>"
-
-    @property
-    def base_url(self) -> str | None:
-        """The base URL configured for the consumer class."""
-        return self._base_url
 
     @property
     def session(self) -> httpx.Client | httpx.AsyncClient:

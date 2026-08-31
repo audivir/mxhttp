@@ -548,10 +548,7 @@ class Downloader(msgspec.Struct, frozen=True):
         segment_errors: dict[int, BaseException] = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_parts) as executor:
             futures = {executor.submit(download_segment, i): i for i in range(num_parts)}
-            # `future.exception()` (not `.result()`) so one failed segment doesn't stop us from
-            # checking the rest: threads can't be cancelled anyway, `shutdown(wait=True)` on
-            # exit already blocks for every one of them, so we may as well see every failure
-            # instead of discarding all but whichever future happened to complete first.
+            # recording exceptions per part, instead of raising directly
             for future in concurrent.futures.as_completed(futures):
                 exc = future.exception()
                 if exc is not None:
@@ -839,14 +836,7 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
         segment_errors: dict[int, BaseException] = {}
 
         async def download_segment_async(part_idx: int) -> None:
-            # A segment that exhausts its retries must not raise directly: raising inside a
-            # `TaskGroup`-spawned task cancels every sibling task immediately, including one
-            # that's mid-write on its own, unrelated segment. With near-zero retry backoff (a
-            # server failing fast on every attempt), that cancellation can land between a
-            # sibling's successful write and its file close, leaking the file handle. Recording
-            # the exception and returning normally lets every segment finish on its own terms;
-            # the first recorded error (by part index, for determinism) is raised once every
-            # segment has already completed cleanly, after the task group below exits.
+            # recording exceptions per part, instead of raising directly
             part_info = parts_state[part_idx]
             seg_path = target.with_name(f"{target.name}.part.{part_idx}")
             needed = part_info.end - part_info.start + 1

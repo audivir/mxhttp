@@ -81,27 +81,21 @@ Missing_T = TypeVar("Missing_T", "Missing", None)
 class BaseEndpointKwargs(TypedDict, Generic[Concurrency_T, Missing_T], total=False):
     """Stores endpoint overrides shared across every HTTP method decorator.
 
+    Overrides replace class-level configs for this endpoints only and do not merge.
+    `None` disables the config for this endpoint.
+
     Attributes:
-        retry: Overrides the class-level `Retry` config for this endpoint only.
-            Pass `None` explicitly to disable retries for this endpoint only.
-        ratelimit: Overrides the class-level `RateLimit` config for this endpoint only.
-            Pass `None` explicitly to disable rate limiting for this endpoint only.
-        base_url: Overrides the class-level base URL for this endpoint only.
-        concurrency: Overrides the class-level `Concurrency` config for this endpoint only.
-            Pass `None` explicitly to disable concurrency limits for this endpoint only.
-        headers: Overrides the class-level `@headers` default for this endpoint only, replacing
-            it outright rather than merging. Pass `None` explicitly to disable it for this
-            endpoint only.
-        cookies: Overrides the class-level `@cookies` default for this endpoint only, replacing
-            it outright rather than merging. Pass `None` explicitly to disable it for this
-            endpoint only.
-        request_handler: Overrides the class-level `@request_handler` default for this endpoint
-            only, replacing it outright rather than composing. Pass `None` explicitly to disable
-            it for this endpoint only.
-        response_handler: Overrides the class-level `@response_handler` default for this endpoint
-            only. Ignored for streaming endpoints; see `streaming_response_handler`.
-        streaming_response_handler: Overrides the class-level `@streaming_response_handler`
-            default for this endpoint only. Ignored for non-streaming endpoints.
+        retry: Overrides the class-level `@retry`.
+        ratelimit: Overrides the class-level `@ratelimit`.
+        base_url: Overrides the class-level and constructor-level `@base_url`.
+        concurrency: Overrides the class-level `@concurrency`.
+        headers: Overrides the class-level `@headers`.
+        cookies: Overrides the class-level `@cookies`.
+        request_handler: Overrides the class-level `@request_handler`.
+        response_handler: Overrides the class-level `@response_handler`.
+            Ignored for streaming endpoints.
+        streaming_response_handler: Overrides the class-level `@streaming_response_handler`.
+            Ignored for non-streaming endpoints.
     """
 
     retry: Retry | Missing_T | None
@@ -224,9 +218,7 @@ def resolve_endpoint_kwargs(
         raw_value = runtime.endpoint_kwargs.get(key, MISSING)
         class_value = self._class_endpoint_kwargs.get(key)
         if key == "base_url":
-            # base_url has its own attribute (like _response_handler), not a
-            # _class_endpoint_kwargs entry: @base_url must also support the constructor's
-            # per-instance base_url= override, which the other five configs don't have.
+            # @base_url must also support the per-instance base_url= override, until we remove it.
             class_value = self._base_url
         value = class_value if raw_value is MISSING else raw_value
         if key == "concurrency" and isinstance(value, int):
@@ -251,7 +243,7 @@ def resolve_idempotency_key(idempotent: bool | Callable[[], str]) -> str | None:
     return str(uuid.uuid4()) if idempotent is True else idempotent()
 
 
-def resolve_gate_url(runtime: EndpointRuntime[Any], resolved: ResolvedEndpointKwargs) -> str | None:
+def resolve_gate_url(runtime: EndpointRuntime[P], resolved: ResolvedEndpointKwargs) -> str | None:
     """Picks the per-call host to key rate-limit/concurrency gates by, mirroring join_url()."""
     if runtime.path.startswith(("http://", "https://")):
         return runtime.path
@@ -382,16 +374,12 @@ def endpoint(  # noqa: C901, PLR0913, PLR0917
         resumable: Reconnects with `Range` (using this `Retry` for reconnect attempts and
             backoff) if the connection drops mid-stream. Only valid for `GET` endpoints
             returning `Iterator[bytes]`/`AsyncIterator[bytes]`/`Downloader`/`AsyncDownloader`.
-            For `Downloader`/`AsyncDownloader`, defaults to `DOWNLOAD_DEFAULT_RETRY` rather than
-            disabling reconnects, since resumability is the entire point of that return type.
+            For `Downloader`/`AsyncDownloader`, defaults to `DOWNLOAD_DEFAULT_RETRY`.
         parts: Configures multi-part parallel segmented download for `Downloader`/`AsyncDownloader`.
         checksum: Configures checksum validation for `Downloader`/`AsyncDownloader`.
-        idempotent: Attaches an `Idempotency-Key` header, stable across `@retry`'s attempts of
-            the same call (generated once per call, before retries begin). `False` (default)
-            attaches nothing. `True` generates a fresh `uuid.uuid4()` per call. A `Callable[[],
-            str]` generates the key itself, called once per call. Only valid for `POST`/`PUT`.
-            `Idempotency-Key` is reserved the same way `Content-Type`/`Cookie` are: it cannot be
-            set through a `Header` parameter, a header bag, or `@headers`.
+        idempotent: If not False, attaches an `Idempotency-Key` header, `True` uses `uuid.uuid4()`.
+            `Callable[[], str]` generates the key itself. Called once per call, before any retries.
+            Only valid for `POST`/`PUT`.
     """
     base_url = kwargs.get("base_url", MISSING)
     if path.startswith(("http://", "https://")):
