@@ -19,9 +19,7 @@ class BearerAuth(httpx.Auth):
         self.token = token
 
     @override
-    def auth_flow(
-        self, request: httpx.Request
-    ) -> Generator[httpx.Request, httpx.Response, None]:
+    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
         """Adds the `Authorization` header before the request is sent."""
         request.headers["Authorization"] = f"Bearer {self.token}"
         yield request
@@ -36,9 +34,7 @@ class ApiKeyAuth(httpx.Auth):
         self.header = header
 
     @override
-    def auth_flow(
-        self, request: httpx.Request
-    ) -> Generator[httpx.Request, httpx.Response, None]:
+    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
         """Adds the API key header before the request is sent."""
         request.headers[self.header] = self.key
         yield request
