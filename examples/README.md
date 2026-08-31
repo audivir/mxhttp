@@ -25,3 +25,6 @@ In another:
 ```bash
 python examples/client.py
 ```
+
+Both accept `--host`/`--port` (default `127.0.0.1:8000`); pass the same values to both, e.g.
+`python examples/server.py --port 8010` and `python examples/client.py --port 8010`.

@@ -525,6 +525,10 @@ shop = Shop(auth=httpx.BasicAuth("alice", "secret"))
 
 The underlying `httpx.Client` or `httpx.AsyncClient` is stored at `.session` to set default headers or other client options after construction.
 
+## Examples
+
+`examples/` has a runnable Litestar server and mxhttp client walking through every feature above. See `examples/README.md`.
+
 ## Tests
 
 ```bash
@@ -533,7 +537,7 @@ pytest
 
 ## Acknowledgements
 
-`mxhttp` is inspired by [Uplink](https://github.com/prkumar/uplink) combined with modern Python typing features.
+`mxhttp` is inspired by [Uplink](https://github.com/prkumar/uplink) combined with Python typing features.
 
 ## License
 

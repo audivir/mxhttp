@@ -15,7 +15,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           python-version: "3.12"
-      - run: uv sync --group dev --extra pydantic
+      - run: uv sync --group dev --extra pydantic --extra examples
       # add mypy to path
       - run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - uses: j178/prek-action@v3.0.0

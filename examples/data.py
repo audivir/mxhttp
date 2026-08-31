@@ -1,5 +1,7 @@
 """Deterministic demo payload shared by the example server and client."""
 
+# ruff: noqa: INP001
+
 from __future__ import annotations
 
 import hashlib
