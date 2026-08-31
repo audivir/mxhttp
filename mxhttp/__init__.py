@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from mxhttp.auth import ApiKeyAuth, BearerAuth
 from mxhttp.checksum import (
     KNOWN_ALGORITHMS,
     Checksum,
@@ -38,12 +39,14 @@ from mxhttp.retry import Retry, retry
 from mxhttp.sse import Event
 from mxhttp.types import PartValue
 
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 
 __all__ = [
     "KNOWN_ALGORITHMS",
+    "ApiKeyAuth",
     "AsyncConsumer",
     "AsyncDownloader",
+    "BearerAuth",
     "Body",
     "Checksum",
     "ChecksumCallback",

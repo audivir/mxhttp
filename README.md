@@ -515,10 +515,13 @@ SSE streams use `@streaming_response_handler` matching byte streaming above.
 
 ### Authentication
 
-Pass `auth=` to the consumer constructor, accepting anything `httpx.Client`/`httpx.AsyncClient` support: an `httpx.Auth` instance (`httpx.BasicAuth`, `httpx.DigestAuth`, or a custom multi-step flow), or a `(username, password)` tuple as Basic auth shorthand.
+Pass `auth=` to the consumer constructor, accepting anything `httpx.Client`/`httpx.AsyncClient` support: an `httpx.Auth` instance (`httpx.BasicAuth`, `httpx.DigestAuth`, or a custom multi-step flow), or a `(username, password)` tuple as Basic auth shorthand. mxhttp ships `BearerAuth` and `ApiKeyAuth` for the two most common header-based schemes.
 
 ```python
 shop = Shop(auth=httpx.BasicAuth("alice", "secret"))
+shop = Shop(auth=BearerAuth("mytoken"))  # Authorization: Bearer mytoken
+shop = Shop(auth=ApiKeyAuth("mykey"))  # X-API-Key: mykey
+shop = Shop(auth=ApiKeyAuth("mykey", header="X-Custom-Key"))
 ```
 
 ### Further configuration

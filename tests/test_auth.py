@@ -9,7 +9,7 @@ import pytest
 from conftest import make_consumer
 from models import ITEM, ITEM_BUILTINS, AsyncCrudApi, CrudApi
 
-from mxhttp import AsyncConsumer, SyncConsumer
+from mxhttp import ApiKeyAuth, AsyncConsumer, BearerAuth, SyncConsumer
 
 pytestmark = pytest.mark.anyio
 
@@ -72,6 +72,57 @@ async def test_tuple_auth_shorthand_authenticates_like_basic_auth(
 
     expected = "Basic " + base64.b64encode(b"alice:secret").decode()
     assert seen[0].headers["Authorization"] == expected
+
+
+@pytest.mark.parametrize("cls", [CrudApi, AsyncCrudApi], ids=["sync", "async"])
+async def test_bearer_auth_sends_authorization_header(*, cls: type[CrudApi | AsyncCrudApi]) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=ITEM_BUILTINS)
+
+    consumer = make_consumer(cls, handler, auth=BearerAuth("mytoken"))
+    if isinstance(consumer, AsyncCrudApi):
+        assert await consumer.get_item(item_id=1) == ITEM
+    else:
+        assert consumer.get_item(item_id=1) == ITEM
+
+    assert seen[0].headers["Authorization"] == "Bearer mytoken"
+
+
+@pytest.mark.parametrize("cls", [CrudApi, AsyncCrudApi], ids=["sync", "async"])
+async def test_api_key_auth_sends_default_header(*, cls: type[CrudApi | AsyncCrudApi]) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=ITEM_BUILTINS)
+
+    consumer = make_consumer(cls, handler, auth=ApiKeyAuth("mykey"))
+    if isinstance(consumer, AsyncCrudApi):
+        assert await consumer.get_item(item_id=1) == ITEM
+    else:
+        assert consumer.get_item(item_id=1) == ITEM
+
+    assert seen[0].headers["X-Api-Key"] == "mykey"
+
+
+@pytest.mark.parametrize("cls", [CrudApi, AsyncCrudApi], ids=["sync", "async"])
+async def test_api_key_auth_sends_custom_header(*, cls: type[CrudApi | AsyncCrudApi]) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=ITEM_BUILTINS)
+
+    consumer = make_consumer(cls, handler, auth=ApiKeyAuth("mykey", header="X-Custom-Key"))
+    if isinstance(consumer, AsyncCrudApi):
+        assert await consumer.get_item(item_id=1) == ITEM
+    else:
+        assert consumer.get_item(item_id=1) == ITEM
+
+    assert seen[0].headers["X-Custom-Key"] == "mykey"
 
 
 DIGEST_CHALLENGE = (

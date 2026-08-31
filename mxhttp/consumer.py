@@ -58,7 +58,8 @@ class BaseConsumer:
                 `@base_url` (if any). Prefer `@base_url` for a URL shared by every instance.
             use_async: Whether to use an `httpx.AsyncClient` instead of `httpx.Client`.
             timeout: Default timeout for every request.
-            auth: `httpx` authentication to attach to every request.
+            auth: `httpx` authentication to attach to every request. Use `BearerAuth` for a
+                bearer token, or a `(username, password)` tuple for HTTP Basic auth.
         """
         import httpx
 
