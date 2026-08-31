@@ -316,5 +316,7 @@ def main() -> int:
     demo_request_handler(api)
 
     return 0
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
