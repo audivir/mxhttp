@@ -6,10 +6,11 @@ import asyncio
 import hashlib
 import io
 import time
-from pathlib import Path  # noqa: TC003
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
+import anyio
 import httpx
 import msgspec
 import pytest
@@ -182,9 +183,10 @@ async def test_download_completes_and_returns_path(
 
     assert result == target
     assert target.read_bytes() == b"hello world"
-    part_path, state_path, _ = part_paths(target)
+    part_path, state_path, lock_path = part_paths(target)
     assert not part_path.exists()
     assert not state_path.exists()
+    assert not lock_path.exists()
 
 
 def test_download_resumes_across_separate_calls(tmp_path: Path) -> None:
@@ -526,8 +528,58 @@ async def test_download_raises_lock_error_when_locked(
             sync_dl = consumer.download(file_id=1)
             with pytest.raises(DownloadLockError):
                 sync_dl(target)
+        # the refused call must not unlink the lock file of the holder.
+        assert lock_path.exists()
 
     handler.assert_not_called()
+
+
+async def download_to(consumer: DownloadApi | AsyncDownloadApi, target: Path) -> Path:
+    if isinstance(consumer, AsyncDownloadApi):
+        return await (await consumer.download(file_id=1))(target)
+    return consumer.download(file_id=1)(target)
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_download_unlinks_lock_file_after_download_while_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    from filelock import FileLock, Timeout
+
+    target = tmp_path / "file.bin"
+    _, _, lock_path = part_paths(target)
+    unlinked: list[Path] = []
+    unlink = Path.unlink
+
+    def spy_unlink(self: Path, *, missing_ok: bool = False) -> None:
+        if self == lock_path:
+            # the download is done, but the lock must still be held when its file goes away.
+            assert target.read_bytes() == b"data"
+            with pytest.raises(Timeout):
+                FileLock(lock_path, timeout=0, fallback_to_soft=False).acquire()
+            unlinked.append(self)
+        unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", spy_unlink)
+    consumer = make_consumer(cls, lambda unused_request: httpx.Response(200, content=b"data"))
+
+    assert await download_to(consumer, target) == target
+    assert unlinked == [lock_path]
+    assert [p.name async for p in anyio.Path(tmp_path).iterdir()] == [target.name]
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_download_ignores_leftover_lock_file_without_holder(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    target = tmp_path / "file.bin"
+    _, _, lock_path = part_paths(target)
+    # a crash between acquire and unlink leaves a plain lock file that nobody holds.
+    await anyio.Path(lock_path).touch()
+    consumer = make_consumer(cls, lambda unused_request: httpx.Response(200, content=b"data"))
+
+    assert await download_to(consumer, target) == target
+    assert not await anyio.Path(lock_path).exists()
 
 
 @pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
@@ -1289,6 +1341,7 @@ async def test_single_stream_download_checksum_mismatch(
             sync_dl(target, checksum="0" * 64)
 
     assert not target.exists()
+    assert not part_paths(target)[2].exists()
 
 
 @pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])

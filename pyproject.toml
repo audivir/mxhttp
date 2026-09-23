@@ -31,7 +31,7 @@ classifiers = [
 ]
 dependencies = [
   "anyio",
-  "filelock",
+  "filelock>=3.20.4",
   "httpx",
   "msgspec",
   "tqdm",

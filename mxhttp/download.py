@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import hashlib
 import os
 import threading
 import time
-from collections.abc import Callable  # noqa: TC003
+from collections.abc import AsyncIterator, Callable, Iterator  # noqa: TC003
 from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias
@@ -162,6 +163,63 @@ def part_paths(path: Path) -> tuple[Path, Path, Path]:
     )
 
 
+@contextlib.contextmanager
+def hold_download_lock(target: Path) -> Iterator[None]:
+    """Holds the lock for a download to `target` and unlinks its lock file before releasing it.
+
+    filelock keeps the lock file on Unix, so it is unlinked here, after the download work and while
+    still held: a waiter that already opened it locks a dead inode, which filelock>=3.20.4 discards
+    and retries. This needs `fallback_to_soft=False`, since a soft lock is released by unlinking
+    its file. On Windows, filelock removes the file itself after release.
+
+    Raises:
+        DownloadLockError: If another process holds the lock.
+    """
+    from filelock import FileLock, Timeout
+
+    lock_path = part_paths(target)[2]
+    lock = FileLock(lock_path, timeout=0, fallback_to_soft=False)
+    try:
+        lock.acquire()
+    except Timeout as e:
+        raise DownloadLockError(f"Download to {target} is locked by another process") from e
+    try:
+        yield
+    finally:
+        try:
+            # on Windows, release already deletes the lock file
+            if os.name != "nt":  # pragma: no branch
+                lock_path.unlink(missing_ok=True)
+        finally:
+            lock.release()
+
+
+@contextlib.asynccontextmanager
+async def hold_download_lock_async(target: anyio.Path) -> AsyncIterator[None]:
+    """Async `hold_download_lock`.
+
+    Raises:
+        DownloadLockError: If another process holds the lock.
+    """
+    from filelock import AsyncFileLock, Timeout
+
+    lock_path = target.with_name(target.name + ".part.lock")
+    lock = AsyncFileLock(lock_path, timeout=0, fallback_to_soft=False)
+    try:
+        await lock.acquire()
+    except Timeout as e:
+        raise DownloadLockError(f"Download to {target} is locked by another process") from e
+    try:
+        yield
+    finally:
+        try:
+            # on Windows, release already deletes the lock file
+            if os.name != "nt":  # pragma: no branch
+                await lock_path.unlink(missing_ok=True)
+        finally:
+            await lock.release()
+
+
 def cleanup_staging_files(target: Path) -> None:
     """Removes all staging fragments and sidecar metadata for target."""
     parent = target.parent
@@ -285,40 +343,33 @@ class Downloader(msgspec.Struct, frozen=True):
                 `overwrite=True` to discard it and start over.
             ResumeLostError: If a reconnect gets a full response instead of a partial one.
         """
-        from filelock import FileLock, Timeout
-
         with gate_concurrency_sync(self.spec.url, self.concurrency):
             target = Path(path)
-            part_path, state_path, lock_path = part_paths(target)
-            try:
-                with FileLock(lock_path, timeout=0, fallback_to_soft=False):
-                    parts_config = resolve_parts(self.parts if parts is None else parts)
-                    checksum_config = resolve_checksum(
-                        self.checksum if checksum is None else checksum
-                    )
-                    if parts_config is None or parts_config.count == 1:
-                        return self._download_single_stream(
-                            target,
-                            part_path,
-                            state_path,
-                            overwrite=overwrite,
-                            on_progress=on_progress,
-                            checksum_config=checksum_config,
-                            on_checksum=on_checksum,
-                        )
-                    return self._download_multi_part(
+            part_path, state_path, _ = part_paths(target)
+            with hold_download_lock(target):
+                parts_config = resolve_parts(self.parts if parts is None else parts)
+                checksum_config = resolve_checksum(self.checksum if checksum is None else checksum)
+                if parts_config is None or parts_config.count == 1:
+                    return self._download_single_stream(
                         target,
                         part_path,
                         state_path,
-                        parts_config=parts_config,
                         overwrite=overwrite,
                         on_progress=on_progress,
-                        on_part_progress=on_part_progress,
                         checksum_config=checksum_config,
                         on_checksum=on_checksum,
                     )
-            except Timeout as e:
-                raise DownloadLockError(f"Download to {target} is locked by another process") from e
+                return self._download_multi_part(
+                    target,
+                    part_path,
+                    state_path,
+                    parts_config=parts_config,
+                    overwrite=overwrite,
+                    on_progress=on_progress,
+                    on_part_progress=on_part_progress,
+                    checksum_config=checksum_config,
+                    on_checksum=on_checksum,
+                )
 
     def _download_single_stream(  # noqa: C901, PLR0913
         self,
@@ -620,42 +671,35 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
             ResumeLostError: If a reconnect gets a full response instead of a partial one.
         """
         import anyio
-        from filelock import AsyncFileLock, Timeout
 
         async with gate_concurrency_async(self.spec.url, self.concurrency):
             target = anyio.Path(path)
             part_path = target.with_name(target.name + ".part")
             state_path = target.with_name(target.name + ".part.json")
-            lock_path = target.with_name(target.name + ".part.lock")
-            try:
-                async with AsyncFileLock(lock_path, timeout=0, fallback_to_soft=False):
-                    parts_config = resolve_parts(self.parts if parts is None else parts)
-                    checksum_config = resolve_checksum(
-                        self.checksum if checksum is None else checksum
-                    )
-                    if parts_config is None or parts_config.count == 1:
-                        return await self._download_single_stream_async(
-                            target,
-                            part_path,
-                            state_path,
-                            overwrite=overwrite,
-                            on_progress=on_progress,
-                            checksum_config=checksum_config,
-                            on_checksum=on_checksum,
-                        )
-                    return await self._download_multi_part_async(
+            async with hold_download_lock_async(target):
+                parts_config = resolve_parts(self.parts if parts is None else parts)
+                checksum_config = resolve_checksum(self.checksum if checksum is None else checksum)
+                if parts_config is None or parts_config.count == 1:
+                    return await self._download_single_stream_async(
                         target,
                         part_path,
                         state_path,
-                        parts_config=parts_config,
                         overwrite=overwrite,
                         on_progress=on_progress,
-                        on_part_progress=on_part_progress,
                         checksum_config=checksum_config,
                         on_checksum=on_checksum,
                     )
-            except Timeout as e:
-                raise DownloadLockError(f"Download to {target} is locked by another process") from e
+                return await self._download_multi_part_async(
+                    target,
+                    part_path,
+                    state_path,
+                    parts_config=parts_config,
+                    overwrite=overwrite,
+                    on_progress=on_progress,
+                    on_part_progress=on_part_progress,
+                    checksum_config=checksum_config,
+                    on_checksum=on_checksum,
+                )
 
     async def _download_single_stream_async(  # noqa: C901, PLR0913
         self,
