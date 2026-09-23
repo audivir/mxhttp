@@ -50,6 +50,7 @@ class BaseConsumer:
         use_async: bool = False,
         timeout: float | httpx.Timeout = 5.0,
         auth: httpx.Auth | tuple[str, str] | None = None,
+        follow_redirects: bool = False,
     ) -> None:
         """Initializes the client.
 
@@ -60,15 +61,17 @@ class BaseConsumer:
             timeout: Default timeout for every request.
             auth: `httpx` authentication to attach to every request. Use `BearerAuth` for a
                 bearer token, or a `(username, password)` tuple for HTTP Basic auth.
+            follow_redirects: Whether to follow 3xx responses for every request, including
+                streaming and download endpoints.
         """
         import httpx
 
         if base_url is not None:
             self._base_url = validate_scheme(base_url)
         self._session = (
-            httpx.AsyncClient(timeout=timeout, auth=auth)
+            httpx.AsyncClient(timeout=timeout, auth=auth, follow_redirects=follow_redirects)
             if use_async
-            else httpx.Client(timeout=timeout, auth=auth)
+            else httpx.Client(timeout=timeout, auth=auth, follow_redirects=follow_redirects)
         )
 
     @override
@@ -90,9 +93,16 @@ class SyncConsumer(BaseConsumer):
         timeout: float | httpx.Timeout = 5.0,
         auth: httpx.Auth | tuple[str, str] | None = None,
         base_url: str | None = None,
+        follow_redirects: bool = False,
     ) -> None:
         """Initializes the synchronous client."""
-        super().__init__(use_async=False, timeout=timeout, auth=auth, base_url=base_url)
+        super().__init__(
+            use_async=False,
+            timeout=timeout,
+            auth=auth,
+            base_url=base_url,
+            follow_redirects=follow_redirects,
+        )
 
     def __enter__(self) -> Self:
         return self
@@ -123,9 +133,16 @@ class AsyncConsumer(BaseConsumer):
         timeout: float | httpx.Timeout = 5.0,
         auth: httpx.Auth | tuple[str, str] | None = None,
         base_url: str | None = None,
+        follow_redirects: bool = False,
     ) -> None:
         """Initializes the asynchronous client."""
-        super().__init__(use_async=True, timeout=timeout, auth=auth, base_url=base_url)
+        super().__init__(
+            use_async=True,
+            timeout=timeout,
+            auth=auth,
+            base_url=base_url,
+            follow_redirects=follow_redirects,
+        )
 
     async def __aenter__(self) -> Self:
         return self

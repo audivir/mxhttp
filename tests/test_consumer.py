@@ -162,3 +162,22 @@ def test_base_url_preserves_subpath_with_slashes() -> None:
 
     assert requests[0].url == httpx.URL("https://api.example.com/v1/items")
     assert requests[1].url == httpx.URL("https://api.example.com/v1/items")
+
+
+@pytest.mark.parametrize("follow_redirects", [True, False])
+def test_consumer_follow_redirects(follow_redirects: bool) -> None:
+    def respond(request: httpx.Request) -> httpx.Response | Item:
+        if request.url.path == "/items/1":
+            return httpx.Response(302, headers={"Location": "/moved/1"})
+        return ITEM
+
+    consumer, requests = make_consumer(
+        CrudApi, respond, follow_redirects=follow_redirects, track_requests=True
+    )
+    if follow_redirects:
+        assert consumer.get_item(item_id=1) == ITEM
+        assert [r.url.path for r in requests] == ["/items/1", "/moved/1"]
+    else:
+        with pytest.raises(httpx.HTTPStatusError):
+            consumer.get_item(item_id=1)
+        assert len(requests) == 1

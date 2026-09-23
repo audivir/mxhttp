@@ -39,7 +39,7 @@ from mxhttp.retry import Retry, retry
 from mxhttp.sse import Event
 from mxhttp.types import PartValue
 
-__version__ = "1.7.1"
+__version__ = "1.8.0"
 
 __all__ = [
     "KNOWN_ALGORITHMS",

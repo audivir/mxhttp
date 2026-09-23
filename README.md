@@ -524,6 +524,14 @@ shop = Shop(auth=ApiKeyAuth("mykey"))  # X-API-Key: mykey
 shop = Shop(auth=ApiKeyAuth("mykey", header="X-Custom-Key"))
 ```
 
+### Redirects
+
+Like `httpx`, consumers do not follow `3xx` responses by default, so the default response handler raises on them. Pass `follow_redirects=True` to the consumer constructor to follow them for every endpoint, including streaming and download endpoints (for example GitHub release assets, which redirect to a CDN):
+
+```python
+releases = Releases(follow_redirects=True)
+```
+
 ### Further configuration
 
 The underlying `httpx.Client` or `httpx.AsyncClient` is stored at `.session` to set default headers or other client options after construction.

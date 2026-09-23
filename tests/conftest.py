@@ -33,6 +33,7 @@ def make_consumer(
     status_code: int = 200,
     base_url: str | None = None,
     auth: httpx.Auth | tuple[str, str] | None = None,
+    follow_redirects: bool = False,
     track_requests: Literal[False] = False,
 ) -> AnyC_T: ...
 @overload
@@ -43,6 +44,7 @@ def make_consumer(
     status_code: int = 200,
     base_url: str | None = None,
     auth: httpx.Auth | tuple[str, str] | None = None,
+    follow_redirects: bool = False,
     track_requests: Literal[True] = ...,
 ) -> tuple[AnyC_T, list[httpx.Request]]: ...
 def make_consumer(  # noqa: C901,PLR0913
@@ -52,6 +54,7 @@ def make_consumer(  # noqa: C901,PLR0913
     status_code: int = 200,
     base_url: str | None = None,
     auth: httpx.Auth | tuple[str, str] | None = None,
+    follow_redirects: bool = False,
     track_requests: bool = False,
 ) -> AnyC_T | tuple[AnyC_T, list[httpx.Request]]:
     import inspect
@@ -80,16 +83,19 @@ def make_consumer(  # noqa: C901,PLR0913
             r = response
         return to_response(r)
 
-    consumer = cls(auth=auth)
+    consumer = cls(auth=auth, follow_redirects=follow_redirects)
+    redirects = consumer.session.follow_redirects
     if base_url is not None:
         consumer._base_url = base_url
     consumer._base_url = consumer._base_url or "https://api.example.com"
 
     if issubclass(cls, SyncConsumer):
-        consumer._session = httpx.Client(transport=httpx.MockTransport(sync_handler), auth=auth)
+        consumer._session = httpx.Client(
+            transport=httpx.MockTransport(sync_handler), auth=auth, follow_redirects=redirects
+        )
     elif issubclass(cls, AsyncConsumer):
         consumer._session = httpx.AsyncClient(
-            transport=httpx.MockTransport(async_handler), auth=auth
+            transport=httpx.MockTransport(async_handler), auth=auth, follow_redirects=redirects
         )
     else:
         raise TypeError(f"Unsupported consumer class: {cls.__name__}")
