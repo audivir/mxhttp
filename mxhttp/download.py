@@ -381,7 +381,8 @@ def probe_remote(
             total_size = extract_total_size(response, 0)
             # a 416 carrying a total size answers the probe for an empty resource.
             if not (
-                response.status_code == HTTPStatus.RANGE_NOT_SATISFIABLE and total_size is not None
+                response.status_code == HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE
+                and total_size is not None
             ):
                 apply_streaming_response_handler(streaming_response_handler, response)
             return ProbeResult(
@@ -413,7 +414,8 @@ async def probe_remote_async(
             total_size = extract_total_size(response, 0)
             # a 416 carrying a total size answers the probe for an empty resource.
             if not (
-                response.status_code == HTTPStatus.RANGE_NOT_SATISFIABLE and total_size is not None
+                response.status_code == HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE
+                and total_size is not None
             ):
                 apply_streaming_response_handler(streaming_response_handler, response)
             return ProbeResult(
