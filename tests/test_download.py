@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import logging
+import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import anyio
@@ -24,6 +26,8 @@ from mxhttp import (
     ChecksumMismatchError,
     Downloader,
     DownloadIdentityError,
+    DownloadInterrupted,
+    DownloadInterruptedError,
     DownloadLockError,
     DownloadState,
     Parts,
@@ -34,6 +38,7 @@ from mxhttp import (
     SyncConsumer,
     TqdmProgress,
     base_url,
+    cleanup_progress,
     get,
 )
 from mxhttp.download import (
@@ -41,7 +46,10 @@ from mxhttp.download import (
     PartState,
     compute_ranges,
     extract_total_size,
+    hold_download_lock,
+    hold_download_lock_async,
     part_paths,
+    resolve_lock_path,
     resolve_parts,
 )
 
@@ -1619,3 +1627,662 @@ def test_endpoint_checksum_validation_errors() -> None:
 
     with pytest.raises(TypeError, match="checksum is only valid for Downloader/AsyncDownloader"):
         conf.validate("GET", None, None, checksum="sha256")
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_existing_file_with_valid_checksum_skips_download(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    handler = MagicMock()
+    consumer = make_consumer(cls, handler)
+
+    target = tmp_path / "finished.bin"
+    content = b"already finished content"
+    target.write_bytes(content)
+    expected_hash = hashlib.sha256(content).hexdigest()
+
+    recorded_checksums: list[str] = []
+    recorded_progress: list[tuple[int, int | None]] = []
+
+    def on_progress(rec: int, tot: int | None) -> None:
+        recorded_progress.append((rec, tot))
+
+    if isinstance(consumer, AsyncDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        result = await async_dl(
+            target,
+            checksum=expected_hash,
+            on_checksum=recorded_checksums.append,
+            on_progress=on_progress,
+        )
+    else:
+        sync_dl = consumer.download(file_id=1)
+        result = sync_dl(
+            target,
+            checksum=expected_hash,
+            on_checksum=recorded_checksums.append,
+            on_progress=on_progress,
+        )
+
+    handler.assert_not_called()
+    assert result == target
+    assert target.read_bytes() == content
+    assert recorded_checksums == [expected_hash]
+    assert recorded_progress == [(len(content), len(content))]
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_existing_file_with_invalid_checksum_raises_or_overwrites(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    def handler(unused_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"fresh valid content")
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "corrupt.bin"
+    target.write_bytes(b"corrupted data")
+    expected_hash = hashlib.sha256(b"fresh valid content").hexdigest()
+
+    if isinstance(consumer, AsyncDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        with pytest.raises(ChecksumMismatchError):
+            await async_dl(target, checksum=expected_hash, overwrite=False)
+        assert target.read_bytes() == b"corrupted data"
+
+        result = await async_dl(target, checksum=expected_hash, overwrite=True)
+        assert result == target
+        assert target.read_bytes() == b"fresh valid content"
+    else:
+        sync_dl = consumer.download(file_id=1)
+        with pytest.raises(ChecksumMismatchError):
+            sync_dl(target, checksum=expected_hash, overwrite=False)
+        assert target.read_bytes() == b"corrupted data"
+
+        result = sync_dl(target, checksum=expected_hash, overwrite=True)
+        assert result == target
+        assert target.read_bytes() == b"fresh valid content"
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_existing_file_without_checksum_matching_size_skips(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    probe_called = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal probe_called
+        range_header = request.headers.get("Range")
+        assert range_header == "bytes=0-0"
+        probe_called += 1
+        return httpx.Response(206, headers={"Content-Range": "bytes 0-0/10"}, content=b"0")
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "matching_size.bin"
+    target.write_bytes(b"0123456789")
+
+    recorded_progress: list[tuple[int, int | None]] = []
+
+    if isinstance(consumer, AsyncDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        result = await async_dl(target, on_progress=lambda r, t: recorded_progress.append((r, t)))
+    else:
+        sync_dl = consumer.download(file_id=1)
+        result = sync_dl(target, on_progress=lambda r, t: recorded_progress.append((r, t)))
+
+    assert result == target
+    assert target.read_bytes() == b"0123456789"
+    assert probe_called == 1
+    assert recorded_progress == [(10, 10)]
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_existing_file_without_checksum_mismatched_size_raises_or_overwrites(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(206, headers={"Content-Range": "bytes 0-0/10"}, content=b"0")
+        return httpx.Response(200, content=b"0123456789")
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "mismatched_size.bin"
+    target.write_bytes(b"short")
+
+    if isinstance(consumer, AsyncDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        with pytest.raises(DownloadIdentityError, match=r"already exists with size 5 bytes"):
+            await async_dl(target, overwrite=False)
+        assert target.read_bytes() == b"short"
+
+        result = await async_dl(target, overwrite=True)
+        assert result == target
+        assert target.read_bytes() == b"0123456789"
+    else:
+        sync_dl = consumer.download(file_id=1)
+        with pytest.raises(DownloadIdentityError, match=r"already exists with size 5 bytes"):
+            sync_dl(target, overwrite=False)
+        assert target.read_bytes() == b"short"
+
+        result = sync_dl(target, overwrite=True)
+        assert result == target
+        assert target.read_bytes() == b"0123456789"
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_existing_file_directory_raises_is_a_directory_error(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    handler = MagicMock()
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "target_dir"
+    target.mkdir()
+
+    if isinstance(consumer, AsyncDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        with pytest.raises(IsADirectoryError):
+            await async_dl(target)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        with pytest.raises(IsADirectoryError):
+            sync_dl(target)
+
+    handler.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_probe_retries_transient_error(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    probe_attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal probe_attempts
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            probe_attempts += 1
+            if probe_attempts == 1:
+                return httpx.Response(503, headers={"Retry-After": "0"})
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/20", "ETag": '"v1"'},
+                content=b"0",
+            )
+        if range_header == "bytes=0-9":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-9/20", "ETag": '"v1"'},
+                content=b"0123456789",
+            )
+        assert range_header == "bytes=10-19"
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 10-19/20", "ETag": '"v1"'},
+            content=b"abcdefghij",
+        )
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "probe_retry.bin"
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        await async_dl(target)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        sync_dl(target)
+
+    assert target.read_bytes() == b"0123456789abcdefghij"
+    assert probe_attempts == 2
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_existing_file_with_compute_only_checksum(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("Range") == "bytes=0-0"
+        return httpx.Response(206, headers={"Content-Range": "bytes 0-0/10"}, content=b"0")
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "compute_only.bin"
+    content = b"0123456789"
+    target.write_bytes(content)
+    expected_hash = hashlib.sha256(content).hexdigest()
+
+    cs = Checksum.sha256()
+    recorded: list[str] = []
+
+    if isinstance(consumer, AsyncDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        result = await async_dl(target, checksum=cs, on_checksum=recorded.append)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        result = sync_dl(target, checksum=cs, on_checksum=recorded.append)
+
+    assert result == target
+    assert cs.digest == expected_hash
+    assert recorded == [expected_hash]
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_probe_remote_zero_byte_range_not_satisfiable(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("Range") == "bytes=0-0"
+        return httpx.Response(416, headers={"Content-Range": "bytes */0"})
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "empty.bin"
+    target.write_bytes(b"")
+
+    if isinstance(consumer, AsyncDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        result = await async_dl(target)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        result = sync_dl(target)
+
+    assert result == target
+    assert target.read_bytes() == b""
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_probe_remote_range_not_satisfiable_without_zero_size_raises(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("Range") == "bytes=0-0"
+        return httpx.Response(416)
+
+    consumer = make_consumer(cls, handler)
+    target = tmp_path / "test_416.bin"
+    target.write_bytes(b"existing content")
+
+    if isinstance(consumer, AsyncDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        with pytest.raises(httpx.HTTPStatusError):
+            await async_dl(target)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        with pytest.raises(httpx.HTTPStatusError):
+            sync_dl(target)
+
+
+def test_multipart_download_keyboard_interrupt_stops_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stream_entered = threading.Event()
+
+    def stream_chunks() -> Iterator[bytes]:
+        stream_entered.set()
+        time.sleep(0.5)
+        yield b"chunk"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/20", "ETag": '"v1"'},
+                content=b"0",
+            )
+        return httpx.Response(206, content=stream_chunks())
+
+    def mock_join(*unused_args: object, **unused_kwargs: object) -> None:
+        stream_entered.wait(timeout=2.0)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(threading.Thread, "join", mock_join)
+
+    consumer = make_consumer(MultiPartDownloadApi, handler)
+    target = tmp_path / "interrupt.bin"
+    sync_dl = consumer.download(file_id=1)
+
+    with pytest.raises(KeyboardInterrupt):
+        sync_dl(target)
+
+
+def test_resolve_lock_path_and_external_lock_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    target = tmp_path / "subdir" / "download.bin"
+    monkeypatch.delenv("MXHTTP_LOCK_DIR", raising=False)
+    default_lock = resolve_lock_path(target)
+    assert default_lock == target.with_name("download.bin.part.lock")
+
+    lock_dir = tmp_path / "custom_locks"
+    monkeypatch.setenv("MXHTTP_LOCK_DIR", str(lock_dir))
+    with caplog.at_level(logging.INFO):
+        custom_lock = resolve_lock_path(target)
+    assert f"Using external lock dir: {lock_dir}" in caplog.text
+    assert custom_lock.parent == lock_dir
+    assert custom_lock.name.endswith(".part.lock")
+    assert lock_dir.is_dir()
+
+
+async def test_hold_download_lock_external_lock_dir_sync_and_async(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    lock_dir = tmp_path / "sync_async_locks"
+    monkeypatch.setenv("MXHTTP_LOCK_DIR", str(lock_dir))
+    target = tmp_path / "data" / "file.bin"
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    with caplog.at_level(logging.INFO), hold_download_lock(target):
+        lock_files = list(lock_dir.glob("*.part.lock"))
+        assert len(lock_files) == 1
+    assert not any(lock_dir.glob("*.part.lock"))
+
+    anyio_target = anyio.Path(target)
+    async with hold_download_lock_async(anyio_target):
+        lock_files = list(lock_dir.glob("*.part.lock"))
+        assert len(lock_files) == 1
+    assert not any(lock_dir.glob("*.part.lock"))
+
+
+def test_cleanup_progress_variants() -> None:
+    cleanup_progress(None)
+
+    class CustomCleanup:
+        def __init__(self) -> None:
+            self.cleaned = False
+
+        def cleanup(self) -> None:
+            self.cleaned = True
+
+    obj1 = CustomCleanup()
+    cleanup_progress(obj1)
+    assert obj1.cleaned
+
+    class CustomClose:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    obj2 = CustomClose()
+    cleanup_progress(obj2)
+    assert obj2.closed
+
+    class FailingCleanup:
+        def cleanup(self) -> None:
+            raise RuntimeError("cleanup failed")
+
+    cleanup_progress(FailingCleanup())
+
+    class NoCleanup:
+        pass
+
+    cleanup_progress(NoCleanup())
+
+
+def test_download_interrupted_error_sync(tmp_path: Path) -> None:
+    class MockProgress:
+        def __init__(self) -> None:
+            self.cleaned = False
+
+        def __call__(self, current: int, total: int | None = None) -> None:
+            pass
+
+        def cleanup(self) -> None:
+            self.cleaned = True
+
+    progress = MockProgress()
+    progress(0, 100)
+
+    def handler(unused_request: httpx.Request) -> httpx.Response:
+        raise KeyboardInterrupt
+
+    consumer = make_consumer(DownloadApi, handler)
+    target = tmp_path / "interrupted.bin"
+    sync_dl = consumer.download(file_id=1)
+
+    with pytest.raises(DownloadInterruptedError) as exc_info:
+        sync_dl(target, on_progress=progress)
+
+    assert isinstance(exc_info.value, KeyboardInterrupt)
+    assert isinstance(exc_info.value, Exception)
+    assert isinstance(exc_info.value, DownloadInterrupted)
+    assert progress.cleaned
+
+
+async def test_download_interrupted_error_async(tmp_path: Path) -> None:
+    class MockProgress:
+        def __init__(self) -> None:
+            self.cleaned = False
+
+        def __call__(self, current: int, total: int | None = None) -> None:
+            pass
+
+        def cleanup(self) -> None:
+            self.cleaned = True
+
+    progress = MockProgress()
+    progress(0, 100)
+
+    def handler(unused_request: httpx.Request) -> httpx.Response:
+        raise KeyboardInterrupt
+
+    consumer = make_consumer(AsyncDownloadApi, handler)
+    target = tmp_path / "async_interrupted.bin"
+    async_dl = await consumer.download(file_id=1)
+
+    with pytest.raises(DownloadInterruptedError) as exc_info:
+        await async_dl(target, on_progress=progress)
+
+    assert isinstance(exc_info.value, KeyboardInterrupt)
+    assert progress.cleaned
+
+
+async def test_download_cancellation_propagates_unchanged(tmp_path: Path) -> None:
+    progress = MagicMock(spec=["__call__", "cleanup"])
+
+    async def stream_chunks() -> AsyncIterator[bytes]:
+        yield b"chunk"
+        await asyncio.Event().wait()
+
+    def handler(unused_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=stream_chunks())
+
+    consumer = make_consumer(AsyncDownloadApi, handler)
+    async_dl = await consumer.download(file_id=1)
+
+    # timeouts rely on the original cancellation reaching them, not DownloadInterruptedError.
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(async_dl(tmp_path / "cancelled.bin", on_progress=progress), 0.1)
+
+    progress.cleanup.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_resumes_when_overwrite_true(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    target = tmp_path / "resume_overwrite.bin"
+    seg0 = tmp_path / "resume_overwrite.bin.part.0"
+    seg1 = tmp_path / "resume_overwrite.bin.part.1"
+    state_file = tmp_path / "resume_overwrite.bin.part.json"
+
+    seg0.write_bytes(b"0123456789")
+    seg1.write_bytes(b"abc")
+
+    url = "https://api.example.com/files/1"
+    state = MultiPartState(
+        url=url,
+        etag='"v1"',
+        last_modified=None,
+        total_size=20,
+        parts=[
+            PartState(index=0, start=0, end=9, received=10),
+            PartState(index=1, start=10, end=19, received=3),
+        ],
+    )
+    state_file.write_bytes(msgspec.json.encode(state))
+
+    requested_ranges: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range", "")
+        requested_ranges.append(range_header)
+        assert range_header == "bytes=13-19"
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 13-19/20", "ETag": '"v1"'},
+            content=b"defghij",
+        )
+
+    consumer = make_consumer(cls, handler)
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        await async_dl(target, overwrite=True)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        sync_dl(target, overwrite=True)
+
+    assert target.read_bytes() == b"0123456789abcdefghij"
+    assert requested_ranges == ["bytes=13-19"]
+
+
+@pytest.mark.parametrize("cls", [DownloadApi, AsyncDownloadApi], ids=["sync", "async"])
+async def test_single_stream_download_resumes_when_overwrite_true(
+    tmp_path: Path, *, cls: type[DownloadApi | AsyncDownloadApi]
+) -> None:
+    target = tmp_path / "single_resume_overwrite.bin"
+    part_path, state_path, _ = part_paths(target)
+    part_path.write_bytes(b"01234")
+    state_path.write_bytes(
+        msgspec.json.encode(
+            DownloadState(url="https://api.example.com/files/1", etag='"v1"', last_modified=None)
+        )
+    )
+
+    requested_ranges: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range", "")
+        requested_ranges.append(range_header)
+        assert range_header == "bytes=5-"
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 5-9/10", "ETag": '"v1"'},
+            content=b"56789",
+        )
+
+    consumer = make_consumer(cls, handler)
+    if isinstance(consumer, AsyncDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        await async_dl(target, overwrite=True)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        sync_dl(target, overwrite=True)
+
+    assert target.read_bytes() == b"0123456789"
+    assert requested_ranges == ["bytes=5-"]
+
+
+def test_multipart_download_cancel_in_retry_and_precheck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    part1_entered_retry = threading.Event()
+
+    orig_thread = threading.Thread
+
+    def custom_thread(*t_args: Any, **t_kwargs: Any) -> threading.Thread:
+        target_func = t_kwargs.get("target")
+        target_args = t_kwargs.get("args", ())
+        if target_args == (2,):
+
+            def delayed_worker(*w_args: object, **w_kwargs: object) -> None:
+                part1_entered_retry.wait(timeout=2.0)
+                time.sleep(0.05)
+                assert callable(target_func)
+                target_func(*w_args, **w_kwargs)
+
+            t_kwargs["target"] = delayed_worker
+        return orig_thread(*t_args, **t_kwargs)
+
+    monkeypatch.setattr(threading, "Thread", custom_thread)
+
+    def mock_join(*unused_args: object, **unused_kwargs: object) -> None:
+        part1_entered_retry.wait(timeout=2.0)
+        time.sleep(0.02)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(orig_thread, "join", mock_join)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/30", "ETag": '"v1"'},
+                content=b"0",
+            )
+        if range_header == "bytes=10-19":
+            part1_entered_retry.set()
+            return httpx.Response(503, headers={"Retry-After": "5"})
+        return httpx.Response(206, content=b"x" * 10)
+
+    consumer = make_consumer(MultiPartDownloadApi, handler)
+    target = tmp_path / "cancel_retry.bin"
+    sync_dl = consumer.download(file_id=1)
+
+    with pytest.raises(DownloadInterruptedError):
+        sync_dl(target, parts=Parts(count=3, min_part_size=10))
+
+
+@pytest.mark.parametrize(
+    "cls", [MultiPartDownloadApi, AsyncMultiPartDownloadApi], ids=["sync", "async"]
+)
+async def test_multipart_download_overwrite_discards_different_url(
+    tmp_path: Path, *, cls: type[MultiPartDownloadApi | AsyncMultiPartDownloadApi]
+) -> None:
+    target = tmp_path / "diff_url.bin"
+    state_file = tmp_path / "diff_url.bin.part.json"
+
+    state = MultiPartState(
+        url="https://api.example.com/other/resource",
+        etag='"v1"',
+        last_modified=None,
+        total_size=20,
+        parts=[
+            PartState(index=0, start=0, end=9, received=10),
+            PartState(index=1, start=10, end=19, received=3),
+        ],
+    )
+    state_file.write_bytes(msgspec.json.encode(state))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("Range")
+        if range_header == "bytes=0-0":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-0/20", "ETag": '"v1"'},
+                content=b"0",
+            )
+        if range_header == "bytes=0-9":
+            return httpx.Response(
+                206,
+                headers={"Content-Range": "bytes 0-9/20", "ETag": '"v1"'},
+                content=b"0123456789",
+            )
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 10-19/20", "ETag": '"v1"'},
+            content=b"abcdefghij",
+        )
+
+    consumer = make_consumer(cls, handler)
+    if isinstance(consumer, AsyncMultiPartDownloadApi):
+        async_dl = await consumer.download(file_id=1)
+        await async_dl(target, overwrite=True)
+    else:
+        sync_dl = consumer.download(file_id=1)
+        sync_dl(target, overwrite=True)
+
+    assert target.read_bytes() == b"0123456789abcdefghij"

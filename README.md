@@ -420,9 +420,14 @@ path = shop_files.download(file_id=7)("/tmp/report.pdf")
 - The endpoint is called once to bind it (no network activity yet). The returned `Downloader`/`AsyncDownloader` is then called with a destination path to run or resume the download.
 - Reconnects the same way `resumable=` streaming does, defaulting to `Retry()` if no `resumable=` override is given.
 - Downloads to `{path}.part` plus a `{path}.part.json` sidecar recording the source URL and `ETag`/`Last-Modified`. Only on a clean finish is `{path}.part` atomically renamed to `path` and the sidecar removed, so `path` itself is never observed half-written.
-- Non-blocking advisory file locking protects concurrent writers from data corruption, raising `DownloadLockError` on contention and releasing cleanly on process exit or termination signals.
-- Calling the `Downloader` again for the same `path` resumes from `{path}.part` if its sidecar identity matches the current request. A mismatch raises `DownloadIdentityError` rather than silently appending to or discarding data. Pass `overwrite=True` to discard existing data and start over.
-- Pass `on_progress=` to receive progress updates `(received_bytes, total_bytes_or_None)` as chunks arrive, or pass `TqdmProgress(desc="Downloading file")` for built-in terminal progress bars.
+- Calling the `Downloader` again for the same `path` resumes from `{path}.part` if an interrupted download is in progress, or skips downloading if `path` is already complete:
+  - If `checksum=` with an expected hash is provided and matches the existing file, `Downloader` verifies the digest locally and completes immediately without network requests. A mismatch raises `ChecksumMismatchError`.
+  - If no checksum is provided, `Downloader` probes the server size: if the existing file size matches the remote resource size, the download is skipped as complete; if sizes differ, `DownloadIdentityError` is raised.
+  - Pass `overwrite=True` to replace an existing target file and discard staging data from mismatched URLs. In-progress staging files (`.part` or `.part.*`) belonging to the same URL are automatically preserved and resumed.
+- File-level locking prevents concurrent downloads to the same target:
+  - By default, locks are acquired alongside the target (`{path}.part.lock`).
+  - Set the `MXHTTP_LOCK_DIR` environment variable to store lock files in a dedicated external directory instead.
+- If interrupted by `Ctrl+C` / `SIGINT`, `DownloadInterruptedError` (aliased as `DownloadInterrupted`) is raised. Task cancellation (for example from `asyncio.timeout`) propagates unchanged. In both cases, attached progress bars (like `TqdmProgress`) are cleaned up.
 
 #### Multi-part parallel downloads
 

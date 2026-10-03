@@ -8,18 +8,21 @@ import random
 import time
 from datetime import datetime, timezone
 from http import HTTPStatus
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, TypeAlias, TypeVar
 
 import msgspec
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection
+    from collections.abc import Callable, Collection, Coroutine
+    from typing import Any
 
     import httpx
 
     from mxhttp.consumer import AsyncConsumer, SyncConsumer
     from mxhttp.request import RequestSpec
     from mxhttp.types import AnyC_T
+
+Result_T = TypeVar("Result_T")
 
 RetryOn: TypeAlias = "int | type[BaseException] | Callable[[httpx.Response], bool]"
 
@@ -144,6 +147,46 @@ def retry(config: Retry) -> Callable[[type[AnyC_T]], type[AnyC_T]]:
         return cls
 
     return decorate
+
+
+def retry_call_sync(
+    func: Callable[[], Result_T],
+    config: Retry,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Result_T:
+    """Executes `func`, retrying on configured exceptions according to `config`."""
+    attempt = 0
+    while True:
+        try:
+            return func()
+        except retryable_exceptions(config.on) as e:  # noqa: PERF203
+            if not is_retryable_exception(e, config):
+                raise
+            attempt += 1
+            if attempt >= config.attempts:
+                raise
+            sleep(resolve_delay(config, attempt, extract_response(e)))
+
+
+async def retry_call_async(
+    func: Callable[[], Coroutine[Any, Any, Result_T]],
+    config: Retry,
+    *,
+    sleep: Callable[[float], Coroutine[Any, Any, None]] = asyncio.sleep,
+) -> Result_T:
+    """Asynchronously executes `func`, retrying on configured exceptions according to `config`."""
+    attempt = 0
+    while True:
+        try:
+            return await func()
+        except retryable_exceptions(config.on) as e:  # noqa: PERF203
+            if not is_retryable_exception(e, config):
+                raise
+            attempt += 1
+            if attempt >= config.attempts:
+                raise
+            await sleep(resolve_delay(config, attempt, extract_response(e)))
 
 
 def send_sync(self: SyncConsumer, spec: RequestSpec, config: Retry) -> httpx.Response:

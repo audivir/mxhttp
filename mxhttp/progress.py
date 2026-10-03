@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from typing import TYPE_CHECKING, TextIO
 
@@ -136,6 +137,22 @@ class TqdmProgress(msgspec.Struct):
                 self._pb.close()
                 self._pb = None
 
+    def cleanup(self) -> None:
+        """Clears progress bars from display and closes them, suppressing errors."""
+        with self._lock:
+            for part_pb in self._part_pbs.values():
+                with contextlib.suppress(Exception):
+                    part_pb.clear()
+                with contextlib.suppress(Exception):
+                    part_pb.close()
+            self._part_pbs.clear()
+            if self._pb is not None:
+                with contextlib.suppress(Exception):
+                    self._pb.clear()
+                with contextlib.suppress(Exception):
+                    self._pb.close()
+                self._pb = None
+
     def __enter__(self) -> Self:
         """Enters context manager."""
         return self
@@ -146,5 +163,8 @@ class TqdmProgress(msgspec.Struct):
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        """Closes progress bar on context exit."""
-        self.close()
+        """Closes progress bars on context exit, clearing them if an exception occurred."""
+        if exc_type is not None:
+            self.cleanup()
+        else:
+            self.close()

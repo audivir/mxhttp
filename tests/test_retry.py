@@ -14,6 +14,7 @@ from conftest import make_consumer, make_stateful_consumer
 from models import ITEM, ITEM_BUILTINS, Item
 
 from mxhttp import AsyncConsumer, Retry, SyncConsumer, get, retry
+from mxhttp.retry import retry_call_async, retry_call_sync
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -464,3 +465,91 @@ def test_is_retryable_exception_and_extract_response() -> None:
     val_err = ValueError("other")
     assert is_retryable_exception(val_err, retry_config) is False
     assert extract_response(val_err) is None
+
+
+def test_retry_call_sync() -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def op() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise httpx.ConnectError("connection refused")
+        return "success"
+
+    result = retry_call_sync(
+        op,
+        Retry(attempts=3, backoff=1.0, jitter=False),
+        sleep=delays.append,
+    )
+    assert result == "success"
+    assert attempts == 3
+    assert len(delays) == 2
+
+    # exhausted attempts
+    with pytest.raises(httpx.ConnectError):
+        retry_call_sync(
+            lambda: (_ for _ in ()).throw(httpx.ConnectError("fail")),
+            Retry(attempts=2, backoff=0),
+            sleep=lambda _: None,
+        )
+
+    # unretryable status code
+    resp_404 = httpx.Response(404, request=httpx.Request("GET", "https://example.com"))
+    with pytest.raises(httpx.HTTPStatusError):
+        retry_call_sync(
+            lambda: (_ for _ in ()).throw(
+                httpx.HTTPStatusError("not found", request=resp_404.request, response=resp_404)
+            ),
+            Retry(attempts=3, on=(500,)),
+            sleep=lambda _: None,
+        )
+
+
+async def test_retry_call_async() -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    async def sleep_mock(d: float) -> None:
+        delays.append(d)
+
+    async def op() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise httpx.ConnectError("connection refused")
+        return "success"
+
+    result = await retry_call_async(
+        op,
+        Retry(attempts=3, backoff=1.0, jitter=False),
+        sleep=sleep_mock,
+    )
+    assert result == "success"
+    assert attempts == 3
+    assert len(delays) == 2
+
+    # exhausted attempts
+    async def fail_op() -> None:
+        raise httpx.ConnectError("fail")
+
+    with pytest.raises(httpx.ConnectError):
+        await retry_call_async(
+            fail_op,
+            Retry(attempts=2, backoff=0),
+            sleep=sleep_mock,
+        )
+
+    # unretryable status code
+    resp_404 = httpx.Response(404, request=httpx.Request("GET", "https://example.com"))
+
+    async def unretryable_op() -> None:
+        raise httpx.HTTPStatusError("not found", request=resp_404.request, response=resp_404)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await retry_call_async(
+            unretryable_op,
+            Retry(attempts=3, on=(500,)),
+            sleep=sleep_mock,
+        )

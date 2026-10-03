@@ -22,11 +22,14 @@ from mxhttp.download import (
     AsyncDownloader,
     Downloader,
     DownloadIdentityError,
+    DownloadInterrupted,
+    DownloadInterruptedError,
     DownloadLockError,
     DownloadState,
     PartProgressCallback,
     Parts,
     ProgressCallback,
+    cleanup_progress,
 )
 from mxhttp.endpoint import delete, endpoint, get, head, patch, post, put
 from mxhttp.headers import HeadersInput, headers
@@ -39,7 +42,7 @@ from mxhttp.retry import Retry, retry
 from mxhttp.sse import Event
 from mxhttp.types import PartValue
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 __all__ = [
     "KNOWN_ALGORITHMS",
@@ -58,6 +61,8 @@ __all__ = [
     "Cookie",
     "CookiesInput",
     "DownloadIdentityError",
+    "DownloadInterrupted",
+    "DownloadInterruptedError",
     "DownloadLockError",
     "DownloadState",
     "Downloader",
@@ -83,6 +88,7 @@ __all__ = [
     "SyncConsumer",
     "TqdmProgress",
     "base_url",
+    "cleanup_progress",
     "concurrency",
     "cookies",
     "delete",

@@ -297,3 +297,74 @@ def test_tqdm_progress_per_part_late_total_and_context_manager() -> None:
 
     assert progress.progress_bar is None
     assert len(progress.part_progress_bars) == 0
+
+
+def test_tqdm_progress_cleanup_unstarted() -> None:
+    progress = TqdmProgress()
+    assert progress.progress_bar is None
+    progress.cleanup()
+    assert progress.progress_bar is None
+
+
+def test_tqdm_progress_cleanup_single() -> None:
+    buf = io.StringIO()
+    progress = TqdmProgress(desc="Cleanup test", file=buf)
+    progress(current=20, total=100)
+    assert progress.progress_bar is not None
+    progress.cleanup()
+    assert progress.progress_bar is None
+
+
+def test_tqdm_progress_cleanup_per_part() -> None:
+    buf = io.StringIO()
+    progress = TqdmProgress(desc="Cleanup multi", file=buf, per_part=True)
+    progress.update_part(
+        part_idx=0, part_received=10, part_total=50, current_total=10, total_size=100
+    )
+    assert progress.progress_bar is not None
+    assert len(progress.part_progress_bars) == 1
+    progress.cleanup()
+    assert progress.progress_bar is None
+    assert len(progress.part_progress_bars) == 0
+
+
+def test_tqdm_progress_context_manager_exception_triggers_cleanup() -> None:
+    buf = io.StringIO()
+    progress = TqdmProgress(desc="Error context", file=buf)
+    progress(current=10, total=100)
+    assert progress.progress_bar is not None
+
+    def fail() -> None:
+        with progress:
+            raise RuntimeError("bang")
+
+    with pytest.raises(RuntimeError, match="bang"):
+        fail()
+
+    assert progress.progress_bar is None
+
+
+def test_tqdm_progress_cleanup_suppresses_exceptions(monkeypatch: pytest.MonkeyPatch) -> None:
+    buf = io.StringIO()
+    progress = TqdmProgress(desc="Suppress error", file=buf, per_part=True)
+    progress.update_part(
+        part_idx=0, part_received=10, part_total=50, current_total=10, total_size=100
+    )
+    pb = progress.progress_bar
+    assert pb is not None
+    part_pb = progress.part_progress_bars[0]
+
+    def failing_clear() -> None:
+        raise RuntimeError("clear failed")
+
+    def failing_close() -> None:
+        raise RuntimeError("close failed")
+
+    monkeypatch.setattr(pb, "clear", failing_clear)
+    monkeypatch.setattr(pb, "close", failing_close)
+    monkeypatch.setattr(part_pb, "clear", failing_clear)
+    monkeypatch.setattr(part_pb, "close", failing_close)
+
+    progress.cleanup()
+    assert progress.progress_bar is None
+    assert len(progress.part_progress_bars) == 0

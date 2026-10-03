@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import contextlib
 import hashlib
+import logging
 import os
 import threading
 import time
@@ -20,6 +20,8 @@ from mxhttp.checksum import (
     Checksum,
     ChecksumCallback,
     ChecksumInput,
+    compute_file_digest,
+    compute_file_digest_async,
     resolve_checksum,
     verify_checksum,
 )
@@ -33,6 +35,8 @@ from mxhttp.retry import (
     extract_response,
     is_retryable_exception,
     resolve_delay,
+    retry_call_async,
+    retry_call_sync,
     retryable_exceptions,
 )
 from mxhttp.types import ResponseHandler  # noqa: TC001
@@ -41,6 +45,8 @@ if TYPE_CHECKING:
     import anyio
     import httpx
     from _typeshed import StrPath
+
+logger = logging.getLogger(__name__)
 
 DOWNLOAD_DEFAULT_RETRY = Retry(attempts=5, max_delay=60.0)
 """Fallback retry budget for `Downloader`/`AsyncDownloader` when `resumable` isn't given."""
@@ -76,6 +82,24 @@ def notify_part(  # noqa: PLR0913, PLR0917
 
 class DownloadIdentityError(Exception):
     """An existing `.part` file belongs to a different resource than the one being downloaded."""
+
+
+class DownloadInterruptedError(KeyboardInterrupt, Exception):
+    """The download was interrupted or cancelled by the user."""
+
+
+DownloadInterrupted: TypeAlias = DownloadInterruptedError
+
+
+def cleanup_progress(callback: object) -> None:
+    """Cleans up or closes progress callback if supported, suppressing any error."""
+    if callback is None:
+        return
+    with contextlib.suppress(Exception):
+        if hasattr(callback, "cleanup"):
+            callback.cleanup()
+        elif hasattr(callback, "close"):
+            callback.close()
 
 
 class DownloadLockError(Exception):
@@ -154,12 +178,23 @@ class DownloadState(msgspec.Struct):
     last_modified: str | None
 
 
+def resolve_lock_path(target: Path) -> Path:
+    """Returns lock file path for `target`, placed in `MXHTTP_LOCK_DIR` if set."""
+    if lock_dir := os.getenv("MXHTTP_LOCK_DIR"):
+        logger.info("Using external lock dir: %s", lock_dir)
+        lock_dir_path = Path(lock_dir)
+        lock_dir_path.mkdir(parents=True, exist_ok=True)
+        safe_name = str(target.resolve()).replace(":", "_").replace(os.sep, "_")
+        return lock_dir_path / f"{safe_name}.part.lock"
+    return target.with_name(target.name + ".part.lock")
+
+
 def part_paths(path: Path) -> tuple[Path, Path, Path]:
     """Returns the staging file, sidecar metadata, and lock paths for a download at `path`."""
     return (
         path.with_name(path.name + ".part"),
         path.with_name(path.name + ".part.json"),
-        path.with_name(path.name + ".part.lock"),
+        resolve_lock_path(path),
     )
 
 
@@ -201,10 +236,12 @@ async def hold_download_lock_async(target: anyio.Path) -> AsyncIterator[None]:
     Raises:
         DownloadLockError: If another process holds the lock.
     """
+    import anyio
     from filelock import AsyncFileLock, Timeout
 
-    lock_path = target.with_name(target.name + ".part.lock")
-    lock = AsyncFileLock(lock_path, timeout=0, fallback_to_soft=False)
+    resolved_lock = resolve_lock_path(Path(target))
+    lock_path = anyio.Path(resolved_lock)
+    lock = AsyncFileLock(resolved_lock, timeout=0, fallback_to_soft=False)
     try:
         await lock.acquire()
     except Timeout as e:
@@ -261,13 +298,15 @@ def load_resume_state(
     Raises:
         DownloadIdentityError: If a `.part` file exists for a different resource.
     """
-    if overwrite or not part_path.exists() or not state_path.exists():
+    if not part_path.exists() or not state_path.exists():
         return 0, None
     state = msgspec.json.decode(state_path.read_bytes(), type=DownloadState)
     if state.url != url:
-        raise DownloadIdentityError(
-            f"{part_path} belongs to a different resource; pass overwrite=True to restart"
-        )
+        if not overwrite:
+            raise DownloadIdentityError(
+                f"{part_path} belongs to a different resource; pass overwrite=True to restart"
+            )
+        return 0, None
     return part_path.stat().st_size, state.etag or state.last_modified
 
 
@@ -289,13 +328,15 @@ async def load_resume_state_async(
     Raises:
         DownloadIdentityError: If a `.part` file exists for a different resource.
     """
-    if overwrite or not await part_path.exists() or not await state_path.exists():
+    if not await part_path.exists() or not await state_path.exists():
         return 0, None
     state = msgspec.json.decode(await state_path.read_bytes(), type=DownloadState)
     if state.url != url:
-        raise DownloadIdentityError(
-            f"{part_path} belongs to a different resource; pass overwrite=True to restart"
-        )
+        if not overwrite:
+            raise DownloadIdentityError(
+                f"{part_path} belongs to a different resource; pass overwrite=True to restart"
+            )
+        return 0, None
     stat = await part_path.stat()
     return stat.st_size, state.etag or state.last_modified
 
@@ -310,6 +351,178 @@ async def write_state_async(
     await state_path.write_bytes(msgspec.json.encode(state))
     validator: str | None = etag or last_modified
     return validator
+
+
+class ProbeResult(msgspec.Struct, frozen=True):
+    """Stores status, total size, and validators from a `Range: bytes=0-0` probe."""
+
+    status_code: int
+    total_size: int | None
+    etag: str | None = None
+    last_modified: str | None = None
+
+
+def probe_remote(
+    consumer: SyncConsumer,
+    spec: RequestSpec,
+    ratelimit: RateLimit | None,
+    retry: Retry,
+    streaming_response_handler: ResponseHandler | None,
+) -> ProbeResult:
+    """Probes remote resource with `Range: bytes=0-0`, retrying transient failures."""
+
+    def send_probe() -> ProbeResult:
+        gate_sync(spec.url, ratelimit)
+        kwargs = spec.to_kwargs()
+        headers = dict(kwargs.get("headers") or {})
+        headers["Range"] = "bytes=0-0"
+        kwargs["headers"] = headers
+        with consumer.session.stream(spec.method, spec.url, **kwargs) as response:
+            total_size = extract_total_size(response, 0)
+            # a 416 carrying a total size answers the probe for an empty resource.
+            if not (
+                response.status_code == HTTPStatus.RANGE_NOT_SATISFIABLE and total_size is not None
+            ):
+                apply_streaming_response_handler(streaming_response_handler, response)
+            return ProbeResult(
+                status_code=response.status_code,
+                total_size=total_size,
+                etag=response.headers.get("etag"),
+                last_modified=response.headers.get("last-modified"),
+            )
+
+    return retry_call_sync(send_probe, retry)
+
+
+async def probe_remote_async(
+    consumer: AsyncConsumer,
+    spec: RequestSpec,
+    ratelimit: RateLimit | None,
+    retry: Retry,
+    streaming_response_handler: ResponseHandler | None,
+) -> ProbeResult:
+    """Asynchronously probes remote resource with `Range: bytes=0-0`, retrying failures."""
+
+    async def send_probe() -> ProbeResult:
+        await gate_async(spec.url, ratelimit)
+        kwargs = spec.to_kwargs()
+        headers = dict(kwargs.get("headers") or {})
+        headers["Range"] = "bytes=0-0"
+        kwargs["headers"] = headers
+        async with consumer.session.stream(spec.method, spec.url, **kwargs) as response:
+            total_size = extract_total_size(response, 0)
+            # a 416 carrying a total size answers the probe for an empty resource.
+            if not (
+                response.status_code == HTTPStatus.RANGE_NOT_SATISFIABLE and total_size is not None
+            ):
+                apply_streaming_response_handler(streaming_response_handler, response)
+            return ProbeResult(
+                status_code=response.status_code,
+                total_size=total_size,
+                etag=response.headers.get("etag"),
+                last_modified=response.headers.get("last-modified"),
+            )
+
+    return await retry_call_async(send_probe, retry)
+
+
+def check_existing_target(  # noqa: PLR0913, PLR0917
+    target: Path,
+    spec: RequestSpec,
+    checksum_config: Checksum | None,
+    consumer: SyncConsumer,
+    ratelimit: RateLimit | None,
+    retry: Retry,
+    streaming_response_handler: ResponseHandler | None,
+    *,
+    on_checksum: ChecksumCallback | None,
+    on_progress: ProgressCallback | None,
+) -> None:
+    """Validates existing destination file against checksum or remote size.
+
+    Raises:
+        ChecksumMismatchError: If the existing file digest does not match expected checksum.
+        DownloadIdentityError: If the existing file size does not match remote resource size.
+        IsADirectoryError: If target is a directory.
+    """
+    if target.is_dir():
+        raise IsADirectoryError(f"{target} is a directory")
+
+    if checksum_config is not None and checksum_config.expected is not None:
+        with target.open("rb") as f:
+            digest = compute_file_digest(f, checksum_config.algorithm)
+        verify_checksum(digest, checksum_config, on_checksum)
+        file_size = target.stat().st_size
+        notify(on_progress, file_size, file_size)
+        cleanup_staging_files(target)
+        return
+
+    probe = probe_remote(consumer, spec, ratelimit, retry, streaming_response_handler)
+    local_size = target.stat().st_size
+    if probe.total_size is not None and local_size == probe.total_size:
+        if checksum_config is not None:
+            with target.open("rb") as f:
+                digest = compute_file_digest(f, checksum_config.algorithm)
+            verify_checksum(digest, checksum_config, on_checksum)
+        notify(on_progress, local_size, probe.total_size)
+        cleanup_staging_files(target)
+        return
+
+    size_desc = f"{probe.total_size} bytes" if probe.total_size is not None else "unknown size"
+    raise DownloadIdentityError(
+        f"{target} already exists with size {local_size} bytes, "
+        f"but remote resource has size {size_desc}; "
+        "pass overwrite=True to restart"
+    )
+
+
+async def check_existing_target_async(  # noqa: PLR0913, PLR0917
+    target: anyio.Path,
+    spec: RequestSpec,
+    checksum_config: Checksum | None,
+    consumer: AsyncConsumer,
+    ratelimit: RateLimit | None,
+    retry: Retry,
+    streaming_response_handler: ResponseHandler | None,
+    *,
+    on_checksum: ChecksumCallback | None,
+    on_progress: ProgressCallback | None,
+) -> None:
+    """Asynchronously validates existing destination file against checksum or remote size.
+
+    Raises:
+        ChecksumMismatchError: If the existing file digest does not match expected checksum.
+        DownloadIdentityError: If the existing file size does not match remote resource size.
+        IsADirectoryError: If target is a directory.
+    """
+    if await target.is_dir():
+        raise IsADirectoryError(f"{target} is a directory")
+
+    if checksum_config is not None and checksum_config.expected is not None:
+        digest = await compute_file_digest_async(target, checksum_config.algorithm)
+        verify_checksum(digest, checksum_config, on_checksum)
+        stat = await target.stat()
+        notify(on_progress, stat.st_size, stat.st_size)
+        await cleanup_staging_files_async(target)
+        return
+
+    probe = await probe_remote_async(consumer, spec, ratelimit, retry, streaming_response_handler)
+    stat = await target.stat()
+    local_size = stat.st_size
+    if probe.total_size is not None and local_size == probe.total_size:
+        if checksum_config is not None:
+            digest = await compute_file_digest_async(target, checksum_config.algorithm)
+            verify_checksum(digest, checksum_config, on_checksum)
+        notify(on_progress, local_size, probe.total_size)
+        await cleanup_staging_files_async(target)
+        return
+
+    size_desc = f"{probe.total_size} bytes" if probe.total_size is not None else "unknown size"
+    raise DownloadIdentityError(
+        f"{target} already exists with size {local_size} bytes, "
+        f"but remote resource has size {size_desc}; "
+        "pass overwrite=True to restart"
+    )
 
 
 class Downloader(msgspec.Struct, frozen=True):
@@ -338,38 +551,65 @@ class Downloader(msgspec.Struct, frozen=True):
         """Downloads (or resumes) to `path`, returning it once the download completes cleanly.
 
         Raises:
-            ChecksumMismatchError: If the downloaded file digest does not match expected checksum.
-            DownloadIdentityError: If a `.part` file exists for a different resource. Pass
-                `overwrite=True` to discard it and start over.
+            ChecksumMismatchError: If the downloaded or existing file digest does not match
+                expected checksum.
+            DownloadIdentityError: If a `.part` file exists for a different resource, or if `path`
+                already exists with a different size than the remote resource. Pass `overwrite=True`
+                to discard it and start over.
             ResumeLostError: If a reconnect gets a full response instead of a partial one.
+            IsADirectoryError: If `path` is an existing directory.
         """
-        with gate_concurrency_sync(self.spec.url, self.concurrency):
-            target = Path(path)
-            part_path, state_path, _ = part_paths(target)
-            with hold_download_lock(target):
-                parts_config = resolve_parts(self.parts if parts is None else parts)
-                checksum_config = resolve_checksum(self.checksum if checksum is None else checksum)
-                if parts_config is None or parts_config.count == 1:
-                    return self._download_single_stream(
+        target = Path(path)
+        try:
+            with gate_concurrency_sync(self.spec.url, self.concurrency):
+                part_path, state_path, _ = part_paths(target)
+                with hold_download_lock(target):
+                    parts_config = resolve_parts(self.parts if parts is None else parts)
+                    checksum_config = resolve_checksum(
+                        self.checksum if checksum is None else checksum
+                    )
+                    if not overwrite and target.exists():
+                        check_existing_target(
+                            target,
+                            self.spec,
+                            checksum_config,
+                            self.consumer,
+                            self.ratelimit,
+                            self.retry,
+                            self.streaming_response_handler,
+                            on_checksum=on_checksum,
+                            on_progress=on_progress,
+                        )
+                        return target
+                    if parts_config is None or parts_config.count == 1:
+                        return self._download_single_stream(
+                            target,
+                            part_path,
+                            state_path,
+                            overwrite=overwrite,
+                            on_progress=on_progress,
+                            checksum_config=checksum_config,
+                            on_checksum=on_checksum,
+                        )
+                    return self._download_multi_part(
                         target,
                         part_path,
                         state_path,
+                        parts_config=parts_config,
                         overwrite=overwrite,
                         on_progress=on_progress,
+                        on_part_progress=on_part_progress,
                         checksum_config=checksum_config,
                         on_checksum=on_checksum,
                     )
-                return self._download_multi_part(
-                    target,
-                    part_path,
-                    state_path,
-                    parts_config=parts_config,
-                    overwrite=overwrite,
-                    on_progress=on_progress,
-                    on_part_progress=on_part_progress,
-                    checksum_config=checksum_config,
-                    on_checksum=on_checksum,
-                )
+        except KeyboardInterrupt as e:
+            cleanup_progress(on_progress)
+            cleanup_progress(on_part_progress)
+            raise DownloadInterruptedError(f"Download to {target} was interrupted") from e
+        except BaseException:
+            cleanup_progress(on_progress)
+            cleanup_progress(on_part_progress)
+            raise
 
     def _download_single_stream(  # noqa: C901, PLR0913
         self,
@@ -450,55 +690,47 @@ class Downloader(msgspec.Struct, frozen=True):
         on_checksum: ChecksumCallback | None = None,
     ) -> Path:
         saved_state: MultiPartState | None = None
-        if not overwrite and state_path.exists():
+        if state_path.exists():
             try:
                 saved_state = msgspec.json.decode(state_path.read_bytes(), type=MultiPartState)
             except (msgspec.DecodeError, OSError):
                 saved_state = None
 
         if saved_state is not None and saved_state.url != self.spec.url:
-            msg = f"{part_path} belongs to a different resource; pass overwrite=True to restart"
-            raise DownloadIdentityError(msg)
+            if not overwrite:
+                msg = f"{part_path} belongs to a different resource; pass overwrite=True to restart"
+                raise DownloadIdentityError(msg)
+            saved_state = None
 
         if saved_state is None:
             cleanup_staging_files(target)
-            gate_sync(self.spec.url, self.ratelimit)
-            probe_kwargs = self.spec.to_kwargs()
-            probe_headers = dict(probe_kwargs.get("headers") or {})
-            probe_headers["Range"] = "bytes=0-0"
-            probe_kwargs["headers"] = probe_headers
+            probe = probe_remote(
+                self.consumer,
+                self.spec,
+                self.ratelimit,
+                self.retry,
+                self.streaming_response_handler,
+            )
+            if (
+                probe.status_code != HTTPStatus.PARTIAL_CONTENT
+                or probe.total_size is None
+                or parts_config.resolve_count(probe.total_size) <= 1
+            ):
+                cleanup_staging_files(target)
+                return self._download_single_stream(
+                    target,
+                    part_path,
+                    state_path,
+                    overwrite=overwrite,
+                    on_progress=on_progress,
+                    checksum_config=checksum_config,
+                    on_checksum=on_checksum,
+                )
 
-            with self.consumer.session.stream(
-                self.spec.method, self.spec.url, **probe_kwargs
-            ) as probe_resp:
-                apply_streaming_response_handler(self.streaming_response_handler, probe_resp)
-                if probe_resp.status_code != HTTPStatus.PARTIAL_CONTENT:
-                    cleanup_staging_files(target)
-                    return self._download_single_stream(
-                        target,
-                        part_path,
-                        state_path,
-                        overwrite=overwrite,
-                        on_progress=on_progress,
-                        checksum_config=checksum_config,
-                        on_checksum=on_checksum,
-                    )
-                total_size = extract_total_size(probe_resp, 0)
-                if total_size is None or parts_config.resolve_count(total_size) <= 1:
-                    cleanup_staging_files(target)
-                    return self._download_single_stream(
-                        target,
-                        part_path,
-                        state_path,
-                        overwrite=overwrite,
-                        on_progress=on_progress,
-                        checksum_config=checksum_config,
-                        on_checksum=on_checksum,
-                    )
-
-                etag = probe_resp.headers.get("etag")
-                last_modified = probe_resp.headers.get("last-modified")
-                validator = etag or last_modified
+            total_size = probe.total_size
+            etag = probe.etag
+            last_modified = probe.last_modified
+            validator = etag or last_modified
 
             num_parts = parts_config.resolve_count(total_size)
             ranges = compute_ranges(total_size, num_parts)
@@ -544,7 +776,12 @@ class Downloader(msgspec.Struct, frozen=True):
                 total_size,
             )
 
-        def download_segment(part_idx: int) -> None:
+        cancel_event = threading.Event()
+        active_responses: dict[int, httpx.Response] = {}
+
+        def download_segment(part_idx: int) -> None:  # noqa: C901
+            if cancel_event.is_set():
+                return
             part_info = parts_state[part_idx]
             seg_path = target.with_name(f"{target.name}.part.{part_idx}")
             needed = part_info.end - part_info.start + 1
@@ -563,30 +800,38 @@ class Downloader(msgspec.Struct, frozen=True):
                     with self.consumer.session.stream(
                         self.spec.method, self.spec.url, **part_kwargs
                     ) as resp:
-                        apply_streaming_response_handler(self.streaming_response_handler, resp)
-                        if (
-                            resp.status_code != HTTPStatus.PARTIAL_CONTENT
-                            and (part_info.start + part_info.received) > 0
-                        ):
-                            raise ResumeLostError("server ignored Range or the resource changed")
-                        with seg_path.open("ab" if part_info.received else "wb") as sfh:
-                            for chunk in resp.iter_bytes():
-                                sfh.write(chunk)
-                                sfh.flush()
-                                part_info.received += len(chunk)
-                                with lock:
-                                    received_per_part[part_idx] = part_info.received
-                                    current_total = sum(received_per_part)
-                                part_total = part_info.end - part_info.start + 1
-                                notify_part(
-                                    on_progress,
-                                    on_part_progress,
-                                    part_idx,
-                                    part_info.received,
-                                    part_total,
-                                    current_total,
-                                    total_size,
+                        active_responses[part_idx] = resp
+                        try:
+                            apply_streaming_response_handler(self.streaming_response_handler, resp)
+                            if (
+                                resp.status_code != HTTPStatus.PARTIAL_CONTENT
+                                and (part_info.start + part_info.received) > 0
+                            ):
+                                raise ResumeLostError(
+                                    "server ignored Range or the resource changed"
                                 )
+                            with seg_path.open("ab" if part_info.received else "wb") as sfh:
+                                for chunk in resp.iter_bytes():
+                                    if cancel_event.is_set():
+                                        return
+                                    sfh.write(chunk)
+                                    sfh.flush()
+                                    part_info.received += len(chunk)
+                                    with lock:
+                                        received_per_part[part_idx] = part_info.received
+                                        current_total = sum(received_per_part)
+                                    part_total = part_info.end - part_info.start + 1
+                                    notify_part(
+                                        on_progress,
+                                        on_part_progress,
+                                        part_idx,
+                                        part_info.received,
+                                        part_total,
+                                        current_total,
+                                        total_size,
+                                    )
+                        finally:
+                            active_responses.pop(part_idx, None)
                     break
                 except retryable_exceptions(self.retry.on) as e:
                     if not is_retryable_exception(e, self.retry):
@@ -594,16 +839,34 @@ class Downloader(msgspec.Struct, frozen=True):
                     attempt += 1
                     if attempt >= self.retry.attempts:
                         raise
-                    time.sleep(resolve_delay(self.retry, attempt, extract_response(e)))
+                    delay = resolve_delay(self.retry, attempt, extract_response(e))
+                    if cancel_event.wait(delay):
+                        return
 
-        segment_errors: dict[int, BaseException] = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_parts) as executor:
-            futures = {executor.submit(download_segment, i): i for i in range(num_parts)}
-            # recording exceptions per part, instead of raising directly
-            for future in concurrent.futures.as_completed(futures):
-                exc = future.exception()
-                if exc is not None:
-                    segment_errors[futures[future]] = exc
+        segment_errors: dict[int, Exception] = {}
+
+        def run_worker(part_idx: int) -> None:
+            try:
+                download_segment(part_idx)
+            except Exception as e:  # noqa: BLE001
+                segment_errors[part_idx] = e
+
+        threads = [
+            threading.Thread(target=run_worker, args=(i,), daemon=True) for i in range(num_parts)
+        ]
+        for t in threads:
+            t.start()
+
+        try:
+            for t in threads:
+                while t.is_alive():
+                    t.join(timeout=0.1)
+        except BaseException:
+            cancel_event.set()
+            for resp in list(active_responses.values()):
+                with contextlib.suppress(Exception):
+                    resp.close()
+            raise
 
         if segment_errors:
             chosen_idx = min(segment_errors)
@@ -665,41 +928,68 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
         """Downloads (or resumes) to `path`, returning it once the download completes cleanly.
 
         Raises:
-            ChecksumMismatchError: If the downloaded file digest does not match expected checksum.
-            DownloadIdentityError: If a `.part` file exists for a different resource. Pass
-                `overwrite=True` to discard it and start over.
+            ChecksumMismatchError: If the downloaded or existing file digest does not match
+                expected checksum.
+            DownloadIdentityError: If a `.part` file exists for a different resource, or if `path`
+                already exists with a different size than the remote resource. Pass `overwrite=True`
+                to discard it and start over.
             ResumeLostError: If a reconnect gets a full response instead of a partial one.
+            IsADirectoryError: If `path` is an existing directory.
         """
         import anyio
 
-        async with gate_concurrency_async(self.spec.url, self.concurrency):
-            target = anyio.Path(path)
-            part_path = target.with_name(target.name + ".part")
-            state_path = target.with_name(target.name + ".part.json")
-            async with hold_download_lock_async(target):
-                parts_config = resolve_parts(self.parts if parts is None else parts)
-                checksum_config = resolve_checksum(self.checksum if checksum is None else checksum)
-                if parts_config is None or parts_config.count == 1:
-                    return await self._download_single_stream_async(
+        target = anyio.Path(path)
+        try:
+            async with gate_concurrency_async(self.spec.url, self.concurrency):
+                part_path = target.with_name(target.name + ".part")
+                state_path = target.with_name(target.name + ".part.json")
+                async with hold_download_lock_async(target):
+                    parts_config = resolve_parts(self.parts if parts is None else parts)
+                    checksum_config = resolve_checksum(
+                        self.checksum if checksum is None else checksum
+                    )
+                    if not overwrite and await target.exists():
+                        await check_existing_target_async(
+                            target,
+                            self.spec,
+                            checksum_config,
+                            self.consumer,
+                            self.ratelimit,
+                            self.retry,
+                            self.streaming_response_handler,
+                            on_checksum=on_checksum,
+                            on_progress=on_progress,
+                        )
+                        return Path(target)
+                    if parts_config is None or parts_config.count == 1:
+                        return await self._download_single_stream_async(
+                            target,
+                            part_path,
+                            state_path,
+                            overwrite=overwrite,
+                            on_progress=on_progress,
+                            checksum_config=checksum_config,
+                            on_checksum=on_checksum,
+                        )
+                    return await self._download_multi_part_async(
                         target,
                         part_path,
                         state_path,
+                        parts_config=parts_config,
                         overwrite=overwrite,
                         on_progress=on_progress,
+                        on_part_progress=on_part_progress,
                         checksum_config=checksum_config,
                         on_checksum=on_checksum,
                     )
-                return await self._download_multi_part_async(
-                    target,
-                    part_path,
-                    state_path,
-                    parts_config=parts_config,
-                    overwrite=overwrite,
-                    on_progress=on_progress,
-                    on_part_progress=on_part_progress,
-                    checksum_config=checksum_config,
-                    on_checksum=on_checksum,
-                )
+        except KeyboardInterrupt as e:
+            cleanup_progress(on_progress)
+            cleanup_progress(on_part_progress)
+            raise DownloadInterruptedError(f"Download to {target} was interrupted") from e
+        except BaseException:
+            cleanup_progress(on_progress)
+            cleanup_progress(on_part_progress)
+            raise
 
     async def _download_single_stream_async(  # noqa: C901, PLR0913
         self,
@@ -782,7 +1072,7 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
         import anyio
 
         saved_state: MultiPartState | None = None
-        if not overwrite and await state_path.exists():
+        if await state_path.exists():
             try:
                 saved_state = msgspec.json.decode(
                     await state_path.read_bytes(), type=MultiPartState
@@ -791,49 +1081,40 @@ class AsyncDownloader(msgspec.Struct, frozen=True):
                 saved_state = None
 
         if saved_state is not None and saved_state.url != self.spec.url:
-            msg = f"{part_path} belongs to a different resource; pass overwrite=True to restart"
-            raise DownloadIdentityError(msg)
+            if not overwrite:
+                msg = f"{part_path} belongs to a different resource; pass overwrite=True to restart"
+                raise DownloadIdentityError(msg)
+            saved_state = None
 
         if saved_state is None:
             await cleanup_staging_files_async(target)
-            await gate_async(self.spec.url, self.ratelimit)
-            probe_kwargs = self.spec.to_kwargs()
-            probe_headers = dict(probe_kwargs.get("headers") or {})
-            probe_headers["Range"] = "bytes=0-0"
-            probe_kwargs["headers"] = probe_headers
+            probe = await probe_remote_async(
+                self.consumer,
+                self.spec,
+                self.ratelimit,
+                self.retry,
+                self.streaming_response_handler,
+            )
+            if (
+                probe.status_code != HTTPStatus.PARTIAL_CONTENT
+                or probe.total_size is None
+                or parts_config.resolve_count(probe.total_size) <= 1
+            ):
+                await cleanup_staging_files_async(target)
+                return await self._download_single_stream_async(
+                    target,
+                    part_path,
+                    state_path,
+                    overwrite=overwrite,
+                    on_progress=on_progress,
+                    checksum_config=checksum_config,
+                    on_checksum=on_checksum,
+                )
 
-            async with self.consumer.session.stream(
-                self.spec.method, self.spec.url, **probe_kwargs
-            ) as probe_resp:
-                apply_streaming_response_handler(self.streaming_response_handler, probe_resp)
-                if probe_resp.status_code != HTTPStatus.PARTIAL_CONTENT:
-                    await cleanup_staging_files_async(target)
-                    return await self._download_single_stream_async(
-                        target,
-                        part_path,
-                        state_path,
-                        overwrite=overwrite,
-                        on_progress=on_progress,
-                        checksum_config=checksum_config,
-                        on_checksum=on_checksum,
-                    )
-
-                total_size = extract_total_size(probe_resp, 0)
-                if total_size is None or parts_config.resolve_count(total_size) <= 1:
-                    await cleanup_staging_files_async(target)
-                    return await self._download_single_stream_async(
-                        target,
-                        part_path,
-                        state_path,
-                        overwrite=overwrite,
-                        on_progress=on_progress,
-                        checksum_config=checksum_config,
-                        on_checksum=on_checksum,
-                    )
-
-                etag = probe_resp.headers.get("etag")
-                last_modified = probe_resp.headers.get("last-modified")
-                validator = etag or last_modified
+            total_size = probe.total_size
+            etag = probe.etag
+            last_modified = probe.last_modified
+            validator = etag or last_modified
 
             num_parts = parts_config.resolve_count(total_size)
             ranges = compute_ranges(total_size, num_parts)
